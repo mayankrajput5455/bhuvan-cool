@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lucknow UHI Cooler - Physics-Informed ML Decision Pipeline</title>
+    <!-- Google Fonts: Inter & Outfit -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <!-- Chart.js for SHAP explaining -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <div class="app-container">
+        <!-- Dashboard Header -->
+        <header class="app-header">
+            <div class="header-logo">
+                <div class="logo-orb"></div>
+                <div class="logo-text">
+                    <h1>BHUVAN-COOL <span class="badge" id="header-city-badge">Lucknow</span></h1>
+                    <p>Physics-Informed XGBoost Multi-City Heat Mitigation Pipeline</p>
+                </div>
+            </div>
+            
+            <div class="city-selector-wrapper">
+                <label for="city-select" class="city-select-label">Active Region:</label>
+                <select id="city-select" class="city-select">
+                    <option value="lucknow" selected>Lucknow (Inland)</option>
+                    <option value="delhi">Delhi (NCR)</option>
+                    <option value="kanpur">Kanpur (Industrial)</option>
+                    <option value="goa">Goa (Coastal Sea)</option>
+                    <option value="mumbai">Mumbai (Peninsula Sea)</option>
+                </select>
+            </div>
+            
+            <div class="view-toggles">
+                <button class="view-btn active" data-view="lst_day">Daytime Heat Map</button>
+                <button class="view-btn" data-view="lst_night">Night-time Heat Map</button>
+                <button class="view-btn" data-view="hvi">Vulnerability Index (HVI)</button>
+                <button class="view-btn" data-view="cluster">Priority Clusters</button>
+                <button class="view-btn" data-view="ventilation">Ventilation Corridors</button>
+            </div>
+            
+            <div class="header-status">
+                <div class="indicator-dot blinking"></div>
+                <span>ML Pipeline: Active</span>
+            </div>
+        </header>
+
+        <!-- Main Layout Grid -->
+        <main class="dashboard-grid">
+            
+            <!-- Left Column: Map and Legend -->
+            <section class="card map-card">
+                <div class="card-header">
+                    <h2><span id="map-city-name">Lucknow</span> City Grid Map</h2>
+                    <div class="overlay-controls">
+                        <label class="checkbox-container">
+                            <input type="checkbox" id="toggle-river" checked>
+                            <span class="checkmark"></span>
+                            Show Water Geometry
+                        </label>
+                        <label class="checkbox-container">
+                            <input type="checkbox" id="toggle-corridors">
+                            <span class="checkmark"></span>
+                            Highlight Wind Pathways
+                        </label>
+                    </div>
+                </div>
+                
+                <div class="map-wrapper">
+                    <!-- Dynamic Grid will render here -->
+                    <div class="city-grid" id="city-grid">
+                        <div class="grid-loading">Loading Lucknow Spatial Data...</div>
+                    </div>
+                </div>
+                
+                <!-- Legend -->
+                <div class="map-legend" id="map-legend">
+                    <!-- Legend contents updated dynamically by active view JS -->
+                </div>
+            </section>
+            
+            <!-- Right Column: Info, SHAP, and Simulation -->
+            <section class="side-panel">
+                
+                <!-- Zone Details & Diagnostics -->
+                <div class="card details-card" id="details-card">
+                    <div class="card-header">
+                        <h2>Zone Diagnostics</h2>
+                        <span class="zone-id-pill" id="selected-zone-id">Select a zone</span>
+                    </div>
+                    <div class="card-body" id="details-placeholder-body">
+                        <div class="empty-state">
+                            <div class="empty-icon">📍</div>
+                            <p>Click on any grid zone of <span id="diagnostics-city-name">Lucknow</span> to run real-time physics-informed temperature diagnostics and SHAP driver analysis.</p>
+                        </div>
+                    </div>
+                    <div class="card-body hidden" id="details-active-body">
+                        <div class="zone-header-info">
+                            <h3 id="selected-zone-name">Hazratganj Sec 1</h3>
+                            <p id="selected-zone-desc">Central Commercial Hub</p>
+                        </div>
+                        
+                        <div class="metrics-grid">
+                            <div class="metric-box">
+                                <span class="metric-label">Actual LST (Day)</span>
+                                <span class="metric-value temp" id="val-lst-day">43.2°C</span>
+                            </div>
+                            <div class="metric-box">
+                                <span class="metric-label">Actual LST (Night)</span>
+                                <span class="metric-value temp" id="val-lst-night">32.1°C</span>
+                            </div>
+                            <div class="metric-box">
+                                <span class="metric-label">Vulnerability (HVI)</span>
+                                <span class="metric-value hvi-badge" id="val-hvi">0.78 (Extreme)</span>
+                            </div>
+                            <div class="metric-box">
+                                <span class="metric-label">Veg Cover (NDVI)</span>
+                                <span class="metric-value" id="val-ndvi">0.08</span>
+                            </div>
+                            <div class="metric-box">
+                                <span class="metric-label">Albedo (Reflectance)</span>
+                                <span class="metric-value" id="val-albedo">0.11</span>
+                            </div>
+                            <div class="metric-box">
+                                <span class="metric-label">Impervious Surface</span>
+                                <span class="metric-value" id="val-isf">92%</span>
+                            </div>
+                        </div>
+
+                        <!-- SHAP Explainability Sub-Panel -->
+                        <div class="shap-section">
+                            <h4>Heat surplus drivers (XGBoost SHAP)</h4>
+                            <div class="chart-container">
+                                <canvas id="shapChart"></canvas>
+                            </div>
+                            <p class="shap-caption">Features extending right increase LST; features extending left provide localized cooling compared to the regional baseline.</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Zone Level Simulation Card -->
+                <div class="card simulation-card" id="simulation-card">
+                    <div class="card-header">
+                        <h2>Scenario Simulator</h2>
+                        <button class="reset-btn" id="btn-reset-simulation">Reset Zone</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="simulation-sliders">
+                            <div class="slider-group">
+                                <div class="slider-info">
+                                    <label for="slide-tree">Urban Tree Planting (NDVI +0.008/%, ISF -0.008/%)</label>
+                                    <span class="slider-val" id="val-slide-tree">0%</span>
+                                </div>
+                                <input type="range" id="slide-tree" min="0" max="30" value="0" step="5" disabled>
+                            </div>
+                            
+                            <div class="slider-group">
+                                <div class="slider-info">
+                                    <label for="slide-roofs">Green Roofs (NDVI +0.005/%, Albedo +0.003/%, ISF -0.005/%)</label>
+                                    <span class="slider-val" id="val-slide-roofs">0%</span>
+                                </div>
+                                <input type="range" id="slide-roofs" min="0" max="40" value="0" step="5" disabled>
+                            </div>
+                            
+                            <div class="slider-group">
+                                <div class="slider-info">
+                                    <label for="slide-pavement">Cool Pavements (Albedo +0.006/%)</label>
+                                    <span class="slider-val" id="val-slide-pavement">0%</span>
+                                </div>
+                                <input type="range" id="slide-pavement" min="0" max="40" value="0" step="5" disabled>
+                            </div>
+                        </div>
+                        
+                        <div class="sim-action-row">
+                            <button class="btn btn-primary" id="btn-run-simulation" disabled>Simulate Local Coolings</button>
+                            <div class="sim-results-badge hidden" id="sim-cooling-badge">
+                                <span>Projected Coolings</span>
+                                <span class="temp-drop" id="val-sim-delta">-0.0°C</span>
+                            </div>
+                        </div>
+                        <div class="sim-cost-est hidden" id="sim-cost-badge">
+                            <span>Est. Capital Expenditure:</span>
+                            <span class="cost-value" id="val-sim-cost">₹0</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- Bottom Panel: Budget Optimizer & Projections Grid -->
+        <footer class="dashboard-footer">
+            
+            <!-- Budget-Constrained Optimizer -->
+            <section class="card optimizer-card">
+                <div class="card-header">
+                    <h2>Municipal Budget-Constrained Optimizer</h2>
+                    <p class="subtitle">Linear Greedy Optimization solver allocating interventions for highest heat reduction</p>
+                </div>
+                <div class="card-body optimizer-body">
+                    <div class="opt-controls">
+                        <div class="slider-group">
+                            <div class="slider-info">
+                                <label for="opt-budget">Total Capital Allocation (INR)</label>
+                                <span class="slider-val font-weight-bold" id="val-opt-budget">₹15,000,000</span>
+                            </div>
+                            <input type="range" id="opt-budget" min="5000000" max="50000000" value="15000000" step="2500000">
+                        </div>
+                        
+                        <div class="opt-toggles-row">
+                            <label class="checkbox-container">
+                                <input type="checkbox" id="opt-hvi-weight" checked>
+                                <span class="checkmark"></span>
+                                Equity-Weighted (Prioritise High HVI Areas)
+                            </label>
+                            <button class="btn btn-secondary" id="btn-run-optimizer">Run Budget Optimisation</button>
+                            <button class="reset-btn" id="btn-reset-optimizer">Clear Optimisation</button>
+                        </div>
+                        
+                        <div class="opt-summary-stats hidden" id="opt-summary-stats">
+                            <div class="stat-item">
+                                <span class="stat-lbl">Total Spent</span>
+                                <span class="stat-val text-success" id="val-opt-spent">₹0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-lbl">Zones Treated</span>
+                                <span class="stat-val" id="val-opt-count">0</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Recommendations Table -->
+                    <div class="opt-results-wrapper">
+                        <table class="opt-table" id="opt-table">
+                            <thead>
+                                <tr>
+                                    <th id="opt-table-header">Lucknow Locality</th>
+                                    <th>HVI Risk</th>
+                                    <th>Trees (植)</th>
+                                    <th>Green Roofs (屋)</th>
+                                    <th>Cool Pave (塗)</th>
+                                    <th>Capital Cost</th>
+                                    <th>Cooling ΔT</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <tr class="empty-table-row">
+                                    <td colspan="7">Adjust capital slider and run optimizer to generate budget allocation.</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </section>
+            
+            <!-- Climate and Urban Growth 2050 Projection -->
+            <section class="card climate-card">
+                <div class="card-header">
+                    <h2 id="projection-city-title">Lucknow 2050 Projection Engine</h2>
+                    <p class="subtitle">Forecasts surface heating under IPCC emissions pathways and urban growth rates</p>
+                </div>
+                <div class="card-body climate-body">
+                    <div class="climate-controls">
+                        <div class="projection-selector">
+                            <label>Time Horizon & Scenario</label>
+                            <div class="radio-group">
+                                <label class="radio-container">
+                                    <input type="radio" name="climate-year" value="2026" checked>
+                                    <span class="radiomark"></span>
+                                    2026 Baseline
+                                </label>
+                                <label class="radio-container">
+                                    <input type="radio" name="climate-year" value="2050-rcp45">
+                                    <span class="radiomark"></span>
+                                    2050 (IPCC RCP 4.5 - Moderate)
+                                </label>
+                                <label class="radio-container">
+                                    <input type="radio" name="climate-year" value="2050-rcp85">
+                                    <span class="radiomark"></span>
+                                    2050 (IPCC RCP 8.5 - Extreme)
+                                </label>
+                            </div>
+                        </div>
+                        
+                        <div class="projection-notes">
+                            <p id="projection-desc-notes"><strong>Urban Expansion Model:</strong> Projects 25% citywide population surge, and a 15% increase in impervious surfaces (loss of vegetation) in peripheral suburban blocks.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </footer>
+    </div>
+
+    <!-- Script loading -->
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
