@@ -186,83 +186,6 @@ def get_shap_values(zone_id):
         "explanation": explanation
     })
 
-@app.route("/api/simulate", methods=["POST"])
-def simulate_cooling():
-    """
-    Simulates cooling for customized interventions in the selected city.
-    """
-    if not city_dataframes:
-        load_resources()
-        
-    city_name, df = get_city_dataframe()
-    req_data = request.get_json() or {}
-    zone_interventions = req_data.get("zone_interventions", {})
-    
-    try:
-        df_sim, total_cost = mp.run_simulation_inference(df, xgb_model, zone_interventions)
-        
-        sim_zones = []
-        for zone_id, interventions in zone_interventions.items():
-            row_sim = df_sim[df_sim["zone_id"] == zone_id]
-            row_orig = df[df["zone_id"] == zone_id]
-            if len(row_sim) == 0: continue
-            
-            sim_zones.append({
-                "zone_id": zone_id,
-                "name": row_sim["name"].values[0],
-                "original_temp": float(row_orig["lst_day_actual"].values[0]),
-                "simulated_temp": float(row_sim["lst_day_pred"].values[0]),
-                "temp_reduction": float(row_sim["lst_delta"].values[0]),
-                "original_ndvi": float(row_orig["ndvi"].values[0]),
-                "simulated_ndvi": float(row_sim["ndvi"].values[0]),
-                "original_albedo": float(row_orig["albedo"].values[0]),
-                "simulated_albedo": float(row_sim["albedo"].values[0]),
-                "original_isf": float(row_orig["isf"].values[0]),
-                "simulated_isf": float(row_sim["isf"].values[0]),
-                "interventions": interventions
-            })
-            
-        return jsonify({
-            "status": "success",
-            "total_cost_inr": total_cost,
-            "simulated_zones": sim_zones,
-            "full_grid": df_sim.to_dict(orient="records")
-        })
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
-
-@app.route("/api/optimize", methods=["POST"])
-def optimize_interventions():
-    """
-    Runs budget optimization for the selected city.
-    """
-    if not city_dataframes:
-        load_resources()
-        
-    city_name, df = get_city_dataframe()
-    req_data = request.get_json() or {}
-    budget = float(req_data.get("budget", 15000000.0))
-    weight_by_hvi = bool(req_data.get("weight_by_hvi", True))
-    
-    try:
-        allocations, recommendations, total_spent = mp.run_greedy_optimizer(
-            df, xgb_model, budget, weight_by_hvi=weight_by_hvi
-        )
-        df_opt, _ = mp.run_simulation_inference(df, xgb_model, allocations)
-        
-        return jsonify({
-            "status": "success",
-            "budget_limit": budget,
-            "total_spent_inr": total_spent,
-            "recommendations": recommendations,
-            "full_grid": df_opt.to_dict(orient="records")
-        })
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"status": "error", "message": str(e)}), 500
 
 @app.route("/api/future-projection", methods=["POST"])
 def get_climate_projections():
@@ -318,3 +241,5 @@ def get_climate_projections():
 if __name__ == "__main__":
     load_resources()
     app.run(host="127.0.0.1", port=5000, debug=True)
+
+# Trigger reload of expanded city datasets

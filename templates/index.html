@@ -10,6 +10,9 @@
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <!-- Chart.js for SHAP explaining -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Leaflet CSS & JS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
     <link rel="stylesheet" href="/static/css/style.css">
 </head>
 <body>
@@ -71,10 +74,7 @@
                 </div>
                 
                 <div class="map-wrapper">
-                    <!-- Dynamic Grid will render here -->
-                    <div class="city-grid" id="city-grid">
-                        <div class="grid-loading">Loading Lucknow Spatial Data...</div>
-                    </div>
+                    <div id="map"></div>
                 </div>
                 
                 <!-- Legend -->
@@ -142,119 +142,33 @@
                     </div>
                 </div>
                 
-                <!-- Zone Level Simulation Card -->
-                <div class="card simulation-card" id="simulation-card">
+                <!-- Cooling Strategies Card -->
+                <div class="card strategies-card" id="strategies-card">
                     <div class="card-header">
-                        <h2>Scenario Simulator</h2>
-                        <button class="reset-btn" id="btn-reset-simulation">Reset Zone</button>
+                        <h2>Targeted Cooling Strategies</h2>
+                        <span class="strategy-badge" id="strategy-city-tag">Active Region</span>
                     </div>
-                    <div class="card-body">
-                        <div class="simulation-sliders">
-                            <div class="slider-group">
-                                <div class="slider-info">
-                                    <label for="slide-tree">Urban Tree Planting (NDVI +0.008/%, ISF -0.008/%)</label>
-                                    <span class="slider-val" id="val-slide-tree">0%</span>
-                                </div>
-                                <input type="range" id="slide-tree" min="0" max="30" value="0" step="5" disabled>
-                            </div>
-                            
-                            <div class="slider-group">
-                                <div class="slider-info">
-                                    <label for="slide-roofs">Green Roofs (NDVI +0.005/%, Albedo +0.003/%, ISF -0.005/%)</label>
-                                    <span class="slider-val" id="val-slide-roofs">0%</span>
-                                </div>
-                                <input type="range" id="slide-roofs" min="0" max="40" value="0" step="5" disabled>
-                            </div>
-                            
-                            <div class="slider-group">
-                                <div class="slider-info">
-                                    <label for="slide-pavement">Cool Pavements (Albedo +0.006/%)</label>
-                                    <span class="slider-val" id="val-slide-pavement">0%</span>
-                                </div>
-                                <input type="range" id="slide-pavement" min="0" max="40" value="0" step="5" disabled>
-                            </div>
+                    <div class="card-body" id="strategies-placeholder-body">
+                        <div class="empty-state">
+                            <div class="empty-icon">🍃</div>
+                            <p>Select a zone on the map to view site-specific climate adaptation and heat mitigation strategies.</p>
                         </div>
-                        
-                        <div class="sim-action-row">
-                            <button class="btn btn-primary" id="btn-run-simulation" disabled>Simulate Local Coolings</button>
-                            <div class="sim-results-badge hidden" id="sim-cooling-badge">
-                                <span>Projected Coolings</span>
-                                <span class="temp-drop" id="val-sim-delta">-0.0°C</span>
-                            </div>
+                    </div>
+                    <div class="card-body hidden" id="strategies-active-body">
+                        <div class="strategy-zone-header">
+                            <h3 id="strategy-zone-name">Hazratganj</h3>
+                            <p id="strategy-zone-suitability">Suitability Diagnostics</p>
                         </div>
-                        <div class="sim-cost-est hidden" id="sim-cost-badge">
-                            <span>Est. Capital Expenditure:</span>
-                            <span class="cost-value" id="val-sim-cost">₹0</span>
+                        <div class="strategy-list" id="strategy-list">
+                            <!-- Dynamic items will be added here -->
                         </div>
                     </div>
                 </div>
             </section>
         </main>
 
-        <!-- Bottom Panel: Budget Optimizer & Projections Grid -->
+        <!-- Bottom Panel: Projections Grid -->
         <footer class="dashboard-footer">
-            
-            <!-- Budget-Constrained Optimizer -->
-            <section class="card optimizer-card">
-                <div class="card-header">
-                    <h2>Municipal Budget-Constrained Optimizer</h2>
-                    <p class="subtitle">Linear Greedy Optimization solver allocating interventions for highest heat reduction</p>
-                </div>
-                <div class="card-body optimizer-body">
-                    <div class="opt-controls">
-                        <div class="slider-group">
-                            <div class="slider-info">
-                                <label for="opt-budget">Total Capital Allocation (INR)</label>
-                                <span class="slider-val font-weight-bold" id="val-opt-budget">₹15,000,000</span>
-                            </div>
-                            <input type="range" id="opt-budget" min="5000000" max="50000000" value="15000000" step="2500000">
-                        </div>
-                        
-                        <div class="opt-toggles-row">
-                            <label class="checkbox-container">
-                                <input type="checkbox" id="opt-hvi-weight" checked>
-                                <span class="checkmark"></span>
-                                Equity-Weighted (Prioritise High HVI Areas)
-                            </label>
-                            <button class="btn btn-secondary" id="btn-run-optimizer">Run Budget Optimisation</button>
-                            <button class="reset-btn" id="btn-reset-optimizer">Clear Optimisation</button>
-                        </div>
-                        
-                        <div class="opt-summary-stats hidden" id="opt-summary-stats">
-                            <div class="stat-item">
-                                <span class="stat-lbl">Total Spent</span>
-                                <span class="stat-val text-success" id="val-opt-spent">₹0</span>
-                            </div>
-                            <div class="stat-item">
-                                <span class="stat-lbl">Zones Treated</span>
-                                <span class="stat-val" id="val-opt-count">0</span>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Recommendations Table -->
-                    <div class="opt-results-wrapper">
-                        <table class="opt-table" id="opt-table">
-                            <thead>
-                                <tr>
-                                    <th id="opt-table-header">Lucknow Locality</th>
-                                    <th>HVI Risk</th>
-                                    <th>Trees (植)</th>
-                                    <th>Green Roofs (屋)</th>
-                                    <th>Cool Pave (塗)</th>
-                                    <th>Capital Cost</th>
-                                    <th>Cooling ΔT</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr class="empty-table-row">
-                                    <td colspan="7">Adjust capital slider and run optimizer to generate budget allocation.</td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </section>
             
             <!-- Climate and Urban Growth 2050 Projection -->
             <section class="card climate-card">
@@ -286,7 +200,8 @@
                         </div>
                         
                         <div class="projection-notes">
-                            <p id="projection-desc-notes"><strong>Urban Expansion Model:</strong> Projects 25% citywide population surge, and a 15% increase in impervious surfaces (loss of vegetation) in peripheral suburban blocks.</p>
+                            <h4 style="margin:0 0 8px 0;font-size:0.8rem;color:var(--text-primary)">Scenario Outlook & Budget</h4>
+                            <p id="projection-desc-notes">Select a scenario to see how the city is projected to look in 2050.</p>
                         </div>
                     </div>
                 </div>
@@ -295,6 +210,6 @@
     </div>
 
     <!-- Script loading -->
-    <script src="/static/js/app.js"></script>
+    <script src="/static/js/app.js?v=2"></script>
 </body>
 </html>

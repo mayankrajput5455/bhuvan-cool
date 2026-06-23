@@ -11,11 +11,16 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentView = "lst_day";  // Active map layer: lst_day, lst_night, hvi, cluster, ventilation
     let activeInterventions = {}; // Track user simulated changes: {zone_id: {tree_planting: X, ...}}
     let shapChart = null;        // Chart.js instance for SHAP values
+    let map = null;              // Leaflet Map instance
+    let gridLayer = null;        // L.layerGroup for grid rectangles
+    let corridorLayer = null;    // L.layerGroup for wind corridors
+    let boundaryLayer = null;    // L.layerGroup for city boundary curves
+    let highlightLayer = null;   // L.layerGroup for selected/hovered indicators
     
     const citySelectEl = document.getElementById("city-select");
     
     // UI Selectors
-    const cityGridEl = document.getElementById("city-grid");
+    const mapEl = document.getElementById("map");
     const viewButtons = document.querySelectorAll(".view-btn");
     const legendEl = document.getElementById("map-legend");
     const toggleRiverCheckbox = document.getElementById("toggle-river");
@@ -34,30 +39,13 @@ document.addEventListener("DOMContentLoaded", () => {
     const valAlbedo = document.getElementById("val-albedo");
     const valIsf = document.getElementById("val-isf");
     
-    // Scenario Simulator Selectors
-    const slideTree = document.getElementById("slide-tree");
-    const slideRoofs = document.getElementById("slide-roofs");
-    const slidePavement = document.getElementById("slide-pavement");
-    const valSlideTree = document.getElementById("val-slide-tree");
-    const valSlideRoofs = document.getElementById("val-slide-roofs");
-    const valSlidePavement = document.getElementById("val-slide-pavement");
-    const btnRunSim = document.getElementById("btn-run-simulation");
-    const btnResetSim = document.getElementById("btn-reset-simulation");
-    const badgeCooling = document.getElementById("sim-cooling-badge");
-    const valSimDelta = document.getElementById("val-sim-delta");
-    const badgeCost = document.getElementById("sim-cost-badge");
-    const valSimCost = document.getElementById("val-sim-cost");
-    
-    // Optimizer Selectors
-    const optBudgetSlider = document.getElementById("opt-budget");
-    const valOptBudget = document.getElementById("val-opt-budget");
-    const optHviWeight = document.getElementById("opt-hvi-weight");
-    const btnRunOpt = document.getElementById("btn-run-optimizer");
-    const btnResetOpt = document.getElementById("btn-reset-optimizer");
-    const badgeOptSummary = document.getElementById("opt-summary-stats");
-    const valOptSpent = document.getElementById("val-opt-spent");
-    const valOptCount = document.getElementById("val-opt-count");
-    const optTableBody = document.querySelector("#opt-table tbody");
+    // Cooling Strategies Card Selectors
+    const strategiesPlaceholder = document.getElementById("strategies-placeholder-body");
+    const strategiesActive = document.getElementById("strategies-active-body");
+    const strategyCityTag = document.getElementById("strategy-city-tag");
+    const strategyZoneName = document.getElementById("strategy-zone-name");
+    const strategyZoneSuitability = document.getElementById("strategy-zone-suitability");
+    const strategyList = document.getElementById("strategy-list");
     
     // Climate Projection Selectors
     const climateRadios = document.querySelectorAll("input[name='climate-year']");
@@ -68,6 +56,14 @@ document.addEventListener("DOMContentLoaded", () => {
     // -------------------------------------------------------------
     // 1. Data Fetching
     // -------------------------------------------------------------
+    const cityCenters = {
+        lucknow: [26.8467, 80.9462],
+        delhi: [28.6139, 77.2090],
+        kanpur: [26.4499, 80.3319],
+        goa: [15.4909, 73.8278],
+        mumbai: [19.0760, 72.8777]
+    };
+
     function fetchCityData() {
         fetch("/api/city-data?city=" + activeCity)
             .then(res => res.json())
@@ -80,18 +76,9 @@ document.addEventListener("DOMContentLoaded", () => {
                     document.getElementById("header-city-badge").innerText = data.city.toUpperCase();
                     document.getElementById("map-city-name").innerText = data.city;
                     document.getElementById("diagnostics-city-name").innerText = data.city;
-                    document.getElementById("opt-table-header").innerText = data.city + " Locality";
                     document.getElementById("projection-city-title").innerText = data.city + " 2050 Projection Engine";
                     
-                    let subNotes = "";
-                    if (activeCity === "lucknow") subNotes = "(Jankipuram, Vrindavan Yojana)";
-                    else if (activeCity === "delhi") subNotes = "(Dwarka, Okhla)";
-                    else if (activeCity === "kanpur") subNotes = "(Kalyanpur, Jajmau)";
-                    else if (activeCity === "goa") subNotes = "(Vasco Port, Miramar)";
-                    else if (activeCity === "mumbai") subNotes = "(Bandra, Juhu)";
-                    
-                    document.getElementById("projection-desc-notes").innerHTML = 
-                        `<strong>Urban Expansion Model:</strong> Projects 25% citywide population surge, and a 15% increase in impervious surfaces (loss of vegetation) in peripheral suburban blocks ${subNotes}.`;
+                    updateProjectionDescription("2026");
                     
                     // Reset local overrides
                     activeInterventions = {};
@@ -103,16 +90,35 @@ document.addEventListener("DOMContentLoaded", () => {
                         };
                     });
                     
+                    // Leaflet map setup
+                    if (!map) {
+                        map = L.map('map', {
+                            zoomControl: true,
+                            minZoom: 10,
+                            maxZoom: 15
+                        });
+                        
+                        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+                            attribution: '&copy; OpenStreetMap contributors &copy; CARTO'
+                        }).addTo(map);
+                        
+                        gridLayer = L.layerGroup().addTo(map);
+                        corridorLayer = L.layerGroup().addTo(map);
+                        boundaryLayer = L.layerGroup().addTo(map);
+                        highlightLayer = L.layerGroup().addTo(map);
+                    }
+                    
+                    const center = cityCenters[activeCity] || [26.8467, 80.9462];
+                    map.setView(center, activeCity === "mumbai" ? 11 : 12);
+                    
                     renderGrid();
                     updateLegend();
-                    setupVectorLayers();
                 } else {
-                    cityGridEl.innerHTML = `<div class="grid-loading text-danger">Error: ${data.message}</div>`;
+                    console.error("API error:", data.message);
                 }
             })
             .catch(err => {
                 console.error("Fetch error:", err);
-                cityGridEl.innerHTML = `<div class="grid-loading text-danger">Server Offline</div>`;
             });
     }
     
@@ -123,13 +129,9 @@ document.addEventListener("DOMContentLoaded", () => {
             selectedZone = null;
             detailsPlaceholder.classList.remove("hidden");
             detailsActive.classList.add("hidden");
-            // Reset sliders panel state
-            slideTree.disabled = true;
-            slideRoofs.disabled = true;
-            slidePavement.disabled = true;
-            btnRunSim.disabled = true;
-            badgeCooling.classList.add("hidden");
-            badgeCost.classList.add("hidden");
+            // Reset strategies panel state
+            strategiesPlaceholder.classList.remove("hidden");
+            strategiesActive.classList.add("hidden");
             
             // Reset projections to baseline
             document.querySelector("input[name='climate-year'][value='2026']").checked = true;
@@ -140,53 +142,205 @@ document.addEventListener("DOMContentLoaded", () => {
     // -------------------------------------------------------------
     // 2. Map Rendering (Grid Map)
     // -------------------------------------------------------------
-    function renderGrid() {
-        cityGridEl.innerHTML = "";
-        
+    // Nearest zone Euclidean search helper
+    function getNearestZone(lat, lon) {
+        if (!currentGrid) return null;
+        let minDistance = Infinity;
+        let nearestZone = null;
         currentGrid.forEach(zone => {
-            const cell = document.createElement("div");
-            cell.className = "grid-cell";
-            cell.id = `cell-${zone.zone_id}`;
-            
-            // Set cell colors based on the current metric view
-            const val = getMetricValue(zone, currentView);
-            let color = getColorForValue(val, currentView, zone);
-            
-            // Direct sea blue coloring for water body cells
-            if (zone.is_water) {
-                color = "#004b6b";
+            const dist = Math.pow(zone.latitude - lat, 2) + Math.pow(zone.longitude - lon, 2);
+            if (dist < minDistance) {
+                minDistance = dist;
+                nearestZone = zone;
             }
-            cell.style.backgroundColor = color;
-            
-            // Mark cells near Gomti River/Yamuna for border formatting
-            if (zone.distance_to_river < 1.1 && !zone.is_water) {
-                cell.classList.add("near-river");
-            }
-            
-            // Highlight wind pathways if active
-            const isCorridorActive = toggleCorridorsCheckbox.checked;
-            if (isCorridorActive && isWindCorridorZone(zone.zone_id)) {
-                cell.classList.add("wind-path");
-                cell.style.boxShadow = "inset 0 0 10px rgba(0, 245, 212, 0.4)";
-            }
-            
-            // Selection formatting
-            if (selectedZone && selectedZone.zone_id === zone.zone_id) {
-                cell.classList.add("selected");
-            }
-            
-            // Tooltip / Hover label
-            if (zone.is_water) {
-                cell.title = `${zone.name}\nLST: ${getLSTValue(zone).toFixed(1)}°C\nWater Body - Interventions Blocked`;
-            } else {
-                cell.title = `${zone.name}\nLST (Day): ${getLSTValue(zone).toFixed(1)}°C\nHVI: ${zone.hvi.toFixed(2)} (${zone.hvi_class})`;
-            }
-            
-            // Click Handler
-            cell.addEventListener("click", () => selectZone(zone.zone_id));
-            
-            cityGridEl.appendChild(cell);
         });
+        return nearestZone;
+    }
+
+    let hoverCircle = null;
+    function drawHoverIndicator(zone) {
+        if (!map) return;
+        if (hoverCircle) {
+            highlightLayer.removeLayer(hoverCircle);
+        }
+        
+        const val = getMetricValue(zone, currentView);
+        const color = zone.is_water ? "#004b6b" : getColorForValue(val, currentView, zone);
+        
+        hoverCircle = L.circle([zone.latitude, zone.longitude], {
+            radius: 250, // 250m radius
+            color: color,
+            weight: 1.5,
+            fillColor: color,
+            fillOpacity: 0.3,
+            dashArray: "4, 4"
+        }).addTo(highlightLayer);
+    }
+    
+    function clearHoverIndicator() {
+        if (hoverCircle && map) {
+            highlightLayer.removeLayer(hoverCircle);
+            hoverCircle = null;
+        }
+    }
+
+    let selectedCircle = null;
+    let selectedOuterRing = null;
+    function drawSelectedHighlight(zone) {
+        if (!map) return;
+        
+        if (selectedCircle) highlightLayer.removeLayer(selectedCircle);
+        if (selectedOuterRing) highlightLayer.removeLayer(selectedOuterRing);
+        
+        const val = getMetricValue(zone, currentView);
+        const color = zone.is_water ? "#00d2ff" : getColorForValue(val, currentView, zone);
+        
+        // Solid center circle
+        selectedCircle = L.circle([zone.latitude, zone.longitude], {
+            radius: 350,
+            color: "var(--accent-teal)",
+            weight: 2,
+            fillColor: color,
+            fillOpacity: 0.45
+        }).addTo(highlightLayer);
+        
+        // Pulsing/dashed outer ring
+        selectedOuterRing = L.circle([zone.latitude, zone.longitude], {
+            radius: 500,
+            color: "var(--accent-teal)",
+            weight: 1,
+            fill: false,
+            dashArray: "6, 6"
+        }).addTo(highlightLayer);
+    }
+
+    function renderGrid() {
+        if (!map || !currentGrid) return;
+        gridLayer.clearLayers();
+        boundaryLayer.clearLayers();
+        highlightLayer.clearLayers();
+        
+        // Calculate grid coordinate ranges
+        const lats = currentGrid.map(z => z.latitude);
+        const lons = currentGrid.map(z => z.longitude);
+        const minLat = Math.min(...lats);
+        const maxLat = Math.max(...lats);
+        const minLon = Math.min(...lons);
+        const maxLon = Math.max(...lons);
+        
+        // Center and scale for squircle boundary
+        const centerLat = (minLat + maxLat) / 2;
+        const centerLon = (minLon + maxLon) / 2;
+        const halfLat = (maxLat - minLat) / 2;
+        const halfLon = (maxLon - minLon) / 2;
+        
+        // 1.08 padding covers all 15x15 cell centroids perfectly
+        const padding = 1.08;
+        const a = halfLon * padding;
+        const b = halfLat * padding;
+        
+        const boundaryPoints = [];
+        const steps = 72;
+        const n = 3.5; // Squircle curvature degree
+        
+        for (let i = 0; i < steps; i++) {
+            const t = (i / steps) * 2 * Math.PI;
+            const cosT = Math.cos(t);
+            const sinT = Math.sin(t);
+            
+            const x = Math.sign(cosT) * Math.pow(Math.abs(cosT), 2 / n) * a;
+            const y = Math.sign(sinT) * Math.pow(Math.abs(sinT), 2 / n) * b;
+            
+            boundaryPoints.push([centerLat + y, centerLon + x]);
+        }
+        
+        // Draw the main city boundary polygon (curved outline)
+        const boundaryPoly = L.polygon(boundaryPoints, {
+            color: "var(--accent-teal)",
+            weight: 2,
+            opacity: 0.85,
+            fillColor: "rgba(0, 242, 254, 0.02)",
+            fillOpacity: 0.15,
+            fill: true,
+            lineJoin: "round"
+        }).addTo(boundaryLayer);
+        
+        // Setup tooltip dynamic binding
+        boundaryPoly.bindTooltip("", { sticky: true, className: "leaflet-tooltip-custom" });
+        
+        // Interactive probing inside the boundary
+        boundaryPoly.on("mousemove", (e) => {
+            const nearest = getNearestZone(e.latlng.lat, e.latlng.lng);
+            if (nearest) {
+                const val = getMetricValue(nearest, currentView);
+                let metricName = "";
+                let metricValStr = "";
+                if (currentView === "lst_day") {
+                    metricName = "LST (Day)";
+                    metricValStr = `${val.toFixed(1)}°C`;
+                } else if (currentView === "lst_night") {
+                    metricName = "LST (Night)";
+                    metricValStr = `${val.toFixed(1)}°C`;
+                } else if (currentView === "hvi") {
+                    metricName = "HVI";
+                    metricValStr = `${val.toFixed(2)} (${nearest.hvi_class})`;
+                } else if (currentView === "cluster") {
+                    metricName = "Priority";
+                    metricValStr = nearest.cluster_label;
+                } else if (currentView === "ventilation") {
+                    metricName = "Ventilation Suitability";
+                    metricValStr = val.toFixed(2);
+                }
+                
+                let tooltipText = `<strong>${nearest.name}</strong><br>${metricName}: ${metricValStr}`;
+                if (nearest.is_water) {
+                    tooltipText = `<strong>${nearest.name}</strong><br>Water Zone<br>LST: ${getLSTValue(nearest).toFixed(1)}°C`;
+                }
+                boundaryPoly.setTooltipContent(tooltipText);
+                
+                // Show dynamic colored hover target circle
+                drawHoverIndicator(nearest);
+            }
+        });
+        
+        boundaryPoly.on("mouseout", () => {
+            clearHoverIndicator();
+        });
+        
+        boundaryPoly.on("click", (e) => {
+            const nearest = getNearestZone(e.latlng.lat, e.latlng.lng);
+            if (nearest) {
+                selectZone(nearest.zone_id);
+            }
+        });
+        
+        // Optional water bodies circles overlay if checked
+        const showWaterGeometry = toggleRiverCheckbox.checked;
+        if (showWaterGeometry) {
+            currentGrid.forEach(zone => {
+                if (zone.is_water) {
+                    L.circle([zone.latitude, zone.longitude], {
+                        radius: 350,
+                        color: "#004b6b",
+                        weight: 1,
+                        fillColor: "#006c9e",
+                        fillOpacity: 0.35
+                    }).bindTooltip(`${zone.name}<br>LST: ${getLSTValue(zone).toFixed(1)}°C<br>Water Zone`, { sticky: true, className: "leaflet-tooltip-custom" })
+                    .on("click", () => {
+                        selectZone(zone.zone_id);
+                    })
+                    .addTo(gridLayer);
+                }
+            });
+        }
+        
+        // Redraw selected zone highlight if one exists
+        if (selectedZone) {
+            drawSelectedHighlight(selectedZone);
+        }
+        
+        // Update wind corridors
+        drawWindCorridors();
     }
 
     // Extract value for active view
@@ -266,122 +420,33 @@ document.addEventListener("DOMContentLoaded", () => {
     // -------------------------------------------------------------
     // 3. Setup SVG Overlay Layers (Gomti River & Wind Pathways)
     // -------------------------------------------------------------
-    function setupVectorLayers() {
-        // Remove old overlays if any
-        const oldOverlays = document.querySelectorAll(".river-svg-overlay, .corridor-svg-overlay");
-        oldOverlays.forEach(el => el.remove());
+    function drawWindCorridors() {
+        if (!map || !cityData) return;
+        corridorLayer.clearLayers();
         
-        const wrapper = document.querySelector(".map-wrapper");
-        const mapW = 600;
-        const mapH = 600;
-        const cellS = mapW / 15;
+        const isCorridorActive = toggleCorridorsCheckbox.checked;
+        if (!isCorridorActive || !cityData.corridors) return;
         
-        // Generate path using city centerline coordinates
-        let pathD = "";
-        if (cityData.water_type === "river_gomti") {
-            // Gomti River
-            for (let row = 0; row < 15; row += 0.5) {
-                const yr = row;
-                const xr = 13.0 - 0.8 * yr - 2.0 * Math.sin(yr / 2.0);
-                const px = (xr + 0.5) * cellS;
-                const py = (yr + 0.5) * cellS;
-                if (row === 0) pathD += `M ${px} ${py}`;
-                else pathD += ` L ${px} ${py}`;
-            }
-        } else if (cityData.water_type === "river_yamuna") {
-            // Yamuna River in Delhi
-            for (let row = 0; row < 15; row += 0.5) {
-                const yr = row;
-                const xr = 9.0 - 0.3 * yr - 1.5 * Math.cos(yr / 3.0);
-                const px = (xr + 0.5) * cellS;
-                const py = (yr + 0.5) * cellS;
-                if (row === 0) pathD += `M ${px} ${py}`;
-                else pathD += ` L ${px} ${py}`;
-            }
-        } else if (cityData.water_type === "river_ganges") {
-            // Ganges River in Kanpur
-            for (let col = 0; col < 15; col += 0.5) {
-                const xr = col;
-                const yr = 13.0 + 0.5 * Math.sin(xr / 2.0);
-                const px = (xr + 0.5) * cellS;
-                const py = (yr + 0.5) * cellS;
-                if (col === 0) pathD += `M ${px} ${py}`;
-                else pathD += ` L ${px} ${py}`;
-            }
-        }
-        
-        // --- 1. Water River SVG ---
-        const riverSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        riverSvg.setAttribute("class", "river-svg-overlay");
-        riverSvg.setAttribute("viewBox", `0 0 ${mapW} ${mapH}`);
-        
-        if (pathD !== "") {
-            const riverPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
-            riverPath.setAttribute("class", "river-path");
-            riverPath.setAttribute("d", pathD);
-            riverSvg.appendChild(riverPath);
-        }
-        wrapper.appendChild(riverSvg);
-        
-        // --- 2. Wind Corridor SVG ---
-        const corridorSvg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-        corridorSvg.setAttribute("class", "corridor-svg-overlay");
-        corridorSvg.setAttribute("viewBox", `0 0 ${mapW} ${mapH}`);
-        
-        // Render arrows or pathways based on wind corridors
-        let pathD1 = "";
-        let pathD2 = "";
-        
-        if (cityData.water_type.startsWith("river")) {
-            pathD1 = `M ${1 * cellS} ${3 * cellS} C ${4 * cellS} ${5 * cellS}, ${8 * cellS} ${8 * cellS}, ${13 * cellS} ${13 * cellS}`;
-            pathD2 = `M ${10 * cellS} ${1 * cellS} L ${12 * cellS} ${8 * cellS} L ${13 * cellS} ${14 * cellS}`;
-        } else {
-            // Coastal cities flow from west to east
-            pathD1 = `M ${0.5 * cellS} ${4 * cellS} L ${14 * cellS} ${4 * cellS}`;
-            pathD2 = `M ${0.5 * cellS} ${10 * cellS} L ${14 * cellS} ${10 * cellS}`;
-        }
-        
-        const windLine1 = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        windLine1.setAttribute("class", "corridor-line");
-        windLine1.setAttribute("d", pathD1);
-        corridorSvg.appendChild(windLine1);
-        
-        const windLine2 = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        windLine2.setAttribute("class", "corridor-line");
-        windLine2.setAttribute("d", pathD2);
-        corridorSvg.appendChild(windLine2);
-        
-        wrapper.appendChild(corridorSvg);
-        
-        // Bind visibility based on state
-        updateVectorVisibility();
+        cityData.corridors.forEach(corridor => {
+            const latlngs = corridor.zones
+                .map(zoneId => currentGrid.find(z => z.zone_id === zoneId))
+                .filter(z => z !== undefined)
+                .map(z => [z.latitude, z.longitude]);
+            
+            if (latlngs.length < 2) return;
+            
+            L.polyline(latlngs, {
+                className: "corridor-line",
+                opacity: 0.8
+            }).addTo(corridorLayer);
+        });
     }
 
-    function updateVectorVisibility() {
-        const riverSvg = document.querySelector(".river-svg-overlay");
-        const corridorSvg = document.querySelector(".corridor-svg-overlay");
-        
-        if (riverSvg) {
-            if (toggleRiverCheckbox.checked) {
-                riverSvg.classList.remove("hidden");
-            } else {
-                riverSvg.classList.add("hidden");
-            }
-        }
-        
-        if (corridorSvg) {
-            if (toggleCorridorsCheckbox.checked) {
-                corridorSvg.classList.add("visible");
-            } else {
-                corridorSvg.classList.remove("visible");
-            }
-        }
-    }
-
-    toggleRiverCheckbox.addEventListener("change", updateVectorVisibility);
+    toggleRiverCheckbox.addEventListener("change", () => {
+        renderGrid();
+    });
     toggleCorridorsCheckbox.addEventListener("change", () => {
-        updateVectorVisibility();
-        renderGrid(); // Redraw grid cells to apply animated wind classes
+        renderGrid();
     });
 
     // -------------------------------------------------------------
@@ -440,12 +505,12 @@ document.addEventListener("DOMContentLoaded", () => {
     // 5. Zone Selection & SHAP Charts
     // -------------------------------------------------------------
     function selectZone(zoneId) {
-        selectedZone = currentGrid.find(z => z.zone_id === zoneId);
+        const found = currentGrid.find(z => z.zone_id === zoneId);
+        if (!found) return;
+        selectedZone = found;
         
-        // Highlight active cell on map
-        document.querySelectorAll(".grid-cell").forEach(el => el.classList.remove("selected"));
-        const cell = document.getElementById(`cell-${zoneId}`);
-        if (cell) cell.classList.add("selected");
+        // Highlight active cell on map via pulsing circles
+        drawSelectedHighlight(selectedZone);
         
         // Render details panel
         detailsPlaceholder.classList.add("hidden");
@@ -484,19 +549,8 @@ document.addEventListener("DOMContentLoaded", () => {
         valAlbedo.innerText = selectedZone.albedo.toFixed(2);
         valIsf.innerText = selectedZone.is_water ? "0% (Water)" : `${Math.round(selectedZone.isf * 100)}%`;
         
-        // Handle water zones simulation bypass
-        if (selectedZone.is_water) {
-            slideTree.disabled = true;
-            slideRoofs.disabled = true;
-            slidePavement.disabled = true;
-            btnRunSim.disabled = true;
-            btnRunSim.innerText = "Intervention Blocked";
-            badgeCooling.classList.add("hidden");
-            badgeCost.classList.add("hidden");
-        } else {
-            btnRunSim.innerText = "Simulate Local Coolings";
-            enableSimulationSliders();
-        }
+        // Update cooling strategies
+        updateCoolingStrategies(selectedZone);
         
         // Draw SHAP explanation
         fetchAndDrawShap(selectedZone.zone_id);
@@ -616,256 +670,182 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     // -------------------------------------------------------------
-    // 7. Local Scenario Simulation
+    // 7. Targeted Cooling Strategies Generator
     // -------------------------------------------------------------
-    function enableSimulationSliders() {
-        slideTree.disabled = false;
-        slideRoofs.disabled = false;
-        slidePavement.disabled = false;
+    function updateCoolingStrategies(zone) {
+        if (!zone) return;
         
-        // Load current simulation levels
-        const simState = activeInterventions[selectedZone.zone_id];
-        slideTree.value = simState.tree_planting;
-        slideRoofs.value = simState.green_roofs;
-        slidePavement.value = simState.cool_pavement;
+        strategiesPlaceholder.classList.add("hidden");
+        strategiesActive.classList.remove("hidden");
         
-        updateSliderLabels();
+        strategyCityTag.innerText = activeCity.toUpperCase() + " STRATEGY";
+        strategyZoneName.innerText = zone.name;
         
-        btnRunSim.disabled = false;
-        
-        // Check if values are zero
-        if (simState.tree_planting > 0 || simState.green_roofs > 0 || simState.cool_pavement > 0) {
-            // calculate the cooling result displays
-            calculateLocalCoolingDisplay();
-        } else {
-            badgeCooling.classList.add("hidden");
-            badgeCost.classList.add("hidden");
-        }
-    }
-
-    function updateSliderLabels() {
-        valSlideTree.innerText = `${slideTree.value}%`;
-        valSlideRoofs.innerText = `${slideRoofs.value}%`;
-        valSlidePavement.innerText = `${slidePavement.value}%`;
-    }
-
-    [slideTree, slideRoofs, slidePavement].forEach(slider => {
-        slider.addEventListener("input", () => {
-            updateSliderLabels();
-            btnRunSim.disabled = false;
-        });
-    });
-
-    btnRunSim.addEventListener("click", () => {
-        if (!selectedZone) return;
-        
-        const zoneId = selectedZone.zone_id;
-        
-        // Record interventions in local state
-        activeInterventions[zoneId] = {
-            tree_planting: parseInt(slideTree.value),
-            green_roofs: parseInt(slideRoofs.value),
-            cool_pavement: parseInt(slidePavement.value)
-        };
-        
-        // Call server to calculate simulation
-        btnRunSim.disabled = true;
-        btnRunSim.innerText = "Simulating...";
-        
-        fetch("/api/simulate", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ 
-                city: activeCity,
-                zone_interventions: activeInterventions 
-            })
-        })
-        .then(res => res.json())
-        .then(data => {
-            btnRunSim.innerText = "Simulate Local Coolings";
-            btnRunSim.disabled = false;
-            
-            if (data.status === "success") {
-                currentGrid = data.full_grid;
-                
-                // Redraw map with updated temperatures
-                renderGrid();
-                
-                // Highlight select
-                const cell = document.getElementById(`cell-${zoneId}`);
-                if (cell) cell.classList.add("selected");
-                
-                // Get updated zone object
-                selectedZone = currentGrid.find(z => z.zone_id === zoneId);
-                
-                // Update results displays
-                const simZoneRes = data.simulated_zones.find(z => z.zone_id === zoneId);
-                if (simZoneRes) {
-                    valLstDay.innerText = `${selectedZone.lst_day_pred.toFixed(1)}°C`;
-                    valLstNight.innerText = `${selectedZone.lst_night_pred.toFixed(1)}°C`;
-                    valNdvi.innerText = selectedZone.ndvi.toFixed(2);
-                    valAlbedo.innerText = selectedZone.albedo.toFixed(2);
-                    valIsf.innerText = `${Math.round(selectedZone.isf * 100)}%`;
-                    
-                    badgeCooling.classList.remove("hidden");
-                    valSimDelta.innerText = `-${simZoneRes.temp_reduction.toFixed(2)}°C`;
-                    
-                    badgeCost.classList.remove("hidden");
-                    valSimCost.innerText = formatCurrency(simZoneRes.interventions.tree_planting * 80000 + 
-                                                         simZoneRes.interventions.green_roofs * 150000 + 
-                                                         simZoneRes.interventions.cool_pavement * 100000);
-                }
-                
-                // Update SHAP values
-                fetchAndDrawShap(zoneId);
-            }
-        })
-        .catch(err => {
-            console.error("Simulation error:", err);
-            btnRunSim.innerText = "Simulate Local Coolings";
-            btnRunSim.disabled = false;
-        });
-    });
-
-    btnResetSim.addEventListener("click", () => {
-        if (!selectedZone) return;
-        const zoneId = selectedZone.zone_id;
-        
-        slideTree.value = 0;
-        slideRoofs.value = 0;
-        slidePavement.value = 0;
-        updateSliderLabels();
-        
-        activeInterventions[zoneId] = {
-            tree_planting: 0,
-            green_roofs: 0,
-            cool_pavement: 0
-        };
-        
-        btnRunSim.click(); // Re-trigger simulation with zeroes to reset
-    });
-
-    function calculateLocalCoolingDisplay() {
-        const zoneId = selectedZone.zone_id;
-        const baselineZone = cityData.zones.find(z => z.zone_id === zoneId);
-        const cooling = baselineZone.lst_day_actual - selectedZone.lst_day_pred;
-        
-        if (cooling > 0.05) {
-            badgeCooling.classList.remove("hidden");
-            valSimDelta.innerText = `-${cooling.toFixed(2)}°C`;
-            
-            const cost = (
-                activeInterventions[zoneId].tree_planting * 80000 +
-                activeInterventions[zoneId].green_roofs * 150000 +
-                activeInterventions[zoneId].cool_pavement * 100000
-            );
-            badgeCost.classList.remove("hidden");
-            valSimCost.innerText = formatCurrency(cost);
-        } else {
-            badgeCooling.classList.add("hidden");
-            badgeCost.classList.add("hidden");
-        }
-    }
-
-    // -------------------------------------------------------------
-    // 8. Municipal Budget Optimization Solver
-    // -------------------------------------------------------------
-    optBudgetSlider.addEventListener("input", () => {
-        valOptBudget.innerText = formatCurrency(optBudgetSlider.value);
-    });
-
-    btnRunOpt.addEventListener("click", () => {
-        const budget = optBudgetSlider.value;
-        const weightByHvi = optHviWeight.checked;
-        
-        btnRunOpt.disabled = true;
-        btnRunOpt.innerText = "Optimising...";
-        
-        fetch("/api/optimize", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                city: activeCity,
-                budget: budget,
-                weight_by_hvi: weightByHvi
-            })
-        })
-        .then(res => res.json())
-        .then(data => {
-            btnRunOpt.innerText = "Run Budget Optimisation";
-            btnRunOpt.disabled = false;
-            
-            if (data.status === "success") {
-                currentGrid = data.full_grid;
-                
-                // Redraw map (automatically shows the cooled/optimized temperatures)
-                renderGrid();
-                
-                // Show optimizer results
-                badgeOptSummary.classList.remove("hidden");
-                valOptSpent.innerText = formatCurrency(data.total_spent_inr);
-                valOptCount.innerText = data.recommendations.length;
-                
-                // Render recommendations table
-                renderOptimizerTable(data.recommendations);
-                
-                // Clear any local simulation slider overlays
-                if (selectedZone) {
-                    selectZone(selectedZone.zone_id);
-                }
-            }
-        })
-        .catch(err => {
-            console.error("Optimization error:", err);
-            btnRunOpt.innerText = "Run Budget Optimisation";
-            btnRunOpt.disabled = false;
-        });
-    });
-
-    function renderOptimizerTable(recs) {
-        optTableBody.innerHTML = "";
-        
-        if (recs.length === 0) {
-            optTableBody.innerHTML = `
-                <tr class="empty-table-row">
-                    <td colspan="7">No interventions could be allocated. Try increasing the capital budget.</td>
-                </tr>
+        if (zone.is_water) {
+            strategyZoneSuitability.innerText = "Natural Water Body Zone - Active Heat Sink";
+            strategyList.innerHTML = `
+                <div class="strategy-item priority-low">
+                    <span class="strategy-icon">🌊</span>
+                    <div class="strategy-content">
+                        <span class="strategy-title">Protect Natural Blue Infrastructure</span>
+                        <span class="strategy-desc">This is an open water grid zone. It plays a critical role in cooling via evaporation and creating localized sea/river breezes. Human interventions or urban development are blocked to safeguard the water microclimate.</span>
+                    </div>
+                </div>
+                <div class="strategy-item priority-medium">
+                    <span class="strategy-icon">💨</span>
+                    <div class="strategy-content">
+                        <span class="strategy-title">Maintain Ventilation Lanes</span>
+                        <span class="strategy-desc">Ensure that surrounding land zones maintain open wind corridors. Restrict high-rise building density directly adjacent to the water front to prevent blocking cool air transport inland.</span>
+                    </div>
+                </div>
             `;
             return;
         }
         
-        recs.forEach(rec => {
-            const row = document.createElement("tr");
-            
-            // Map HVI value to badge styling
-            let hviLabel = "Low";
-            let hviColor = "text-success";
-            if (rec.hvi >= 0.68) { hviLabel = "Extreme"; hviColor = "text-danger"; }
-            else if (rec.hvi >= 0.52) { hviLabel = "High"; hviColor = "text-warning"; }
-            else if (rec.hvi >= 0.35) { hviLabel = "Medium"; hviColor = "text-info"; }
-            
-            row.innerHTML = `
-                <td><strong>${rec.name}</strong></td>
-                <td class="${hviColor}"><strong>${hviLabel}</strong></td>
-                <td>${rec.tree_planting > 0 ? rec.tree_planting + '%' : '-'}</td>
-                <td>${rec.green_roofs > 0 ? rec.green_roofs + '%' : '-'}</td>
-                <td>${rec.cool_pavement > 0 ? rec.cool_pavement + '%' : '-'}</td>
-                <td><strong>${formatCurrency(rec.cost)}</strong></td>
-                <td class="text-success font-weight-bold">-${rec.cooling_impact.toFixed(2)}°C</td>
-            `;
-            
-            // Allow row clicking to select that zone on map
-            row.style.cursor = "pointer";
-            row.addEventListener("click", () => {
-                selectZone(rec.zone_id);
+        // Land zone suitability score display
+        const suitabilityScore = ((1.0 - zone.isf) * 50 + (zone.wind_speed / 6.0) * 30 + (zone.ndvi) * 20).toFixed(0);
+        strategyZoneSuitability.innerText = `Cooling Suitability Score: ${suitabilityScore}/100`;
+        
+        let strategies = [];
+        
+        // 1. NDVI Strategy
+        if (zone.ndvi < 0.20) {
+            strategies.push({
+                priority: "high",
+                icon: "🌳",
+                title: "Aggressive Urban Tree Planting",
+                desc: `Vegetation cover is critically low (NDVI: ${zone.ndvi.toFixed(2)}). Implement street tree lines, pocket forests, and public parks to increase evapotranspiration. Target NDVI increase to 0.35+.`
             });
-            
-            optTableBody.appendChild(row);
+        } else if (zone.ndvi < 0.40) {
+            strategies.push({
+                priority: "medium",
+                icon: "🌿",
+                title: "Vegetative Buffer Extensions",
+                desc: `Moderate vegetation cover (NDVI: ${zone.ndvi.toFixed(2)}). Extend tree rows, introduce vertical greening on building facades, and establish community gardens.`
+            });
+        } else {
+            strategies.push({
+                priority: "low",
+                icon: "🌲",
+                title: "Preserve Existing Green Cover",
+                desc: `Excellent vegetation density (NDVI: ${zone.ndvi.toFixed(2)}). Protect the mature tree canopy from real-estate clearing and maintain local biodiversity.`
+            });
+        }
+        
+        // 2. Albedo Strategy
+        if (zone.albedo < 0.15) {
+            strategies.push({
+                priority: "high",
+                icon: "🎨",
+                title: "Cool Roofs and High-Albedo Coatings",
+                desc: `Surface albedo is low (Reflectance: ${zone.albedo.toFixed(2)}), leading to high solar heat absorption. Apply white elastomeric or reflective roof coatings on flat rooftops.`
+            });
+        } else {
+            strategies.push({
+                priority: "low",
+                icon: "🏠",
+                title: "Cool Surface Maintenance",
+                desc: `Good solar reflectivity (Albedo: ${zone.albedo.toFixed(2)}). Ensure periodic cleaning of high-albedo roofs to maintain optimal reflectance and minimize solar heating.`
+            });
+        }
+        
+        // 3. ISF Strategy
+        if (zone.isf > 0.70) {
+            strategies.push({
+                priority: "high",
+                icon: "🧱",
+                title: "De-Paving & Permeable Surfaces",
+                desc: `High impervious fraction (ISF: ${Math.round(zone.isf * 100)}%). Replace asphalt parking lots and pedestrian pathways with permeable grass-pavements or light-colored gravel to reduce heat retention.`
+            });
+        } else if (zone.isf > 0.40) {
+            strategies.push({
+                priority: "medium",
+                icon: "🏡",
+                title: "Green Roof Installation",
+                desc: `Moderate impervious surface (ISF: ${Math.round(zone.isf * 100)}%). Install intensive or extensive green roofs on commercial and municipal buildings to store stormwater and cool the air.`
+            });
+        }
+        
+        // 4. HVI Strategy
+        if (zone.hvi >= 0.68) {
+            strategies.push({
+                priority: "high",
+                icon: "🌡️",
+                title: "Extreme Social Heat Support",
+                desc: `This locality is an extreme heat-vulnerability risk zone (HVI Score: ${zone.hvi.toFixed(2)}). Establish designated public cooling centers, deploy misting fans in public markets, and run regular heat safety drills.`
+            });
+        } else if (zone.hvi >= 0.52) {
+            strategies.push({
+                priority: "medium",
+                icon: "💧",
+                title: "Community Hydration Stations",
+                desc: `High vulnerability area (HVI Score: ${zone.hvi.toFixed(2)}). Provide free drinking water kiosks, public shade structures, and coordinate cooling support networks for the elderly.`
+            });
+        }
+        
+        // 5. Proximity to River/Ventilation
+        if (zone.distance_to_river < 2.0) {
+            strategies.push({
+                priority: "medium",
+                icon: "💨",
+                title: "Ventilation Path Protection",
+                desc: `Zone is close to a major wind ventilation river/sea corridor. Enforce building height limits and open setbacks perpendicular to the water front to allow cool breeze penetration.`
+            });
+        }
+        
+        // 6. City-Specific Regional Strategies
+        let regionalTitle = "";
+        let regionalDesc = "";
+        let regionalIcon = "📍";
+        
+        if (activeCity === "lucknow") {
+            regionalTitle = "Lucknow Green-Blue Integration";
+            regionalDesc = "Align green corridors connecting local parks with the Gomti River basin. Promote traditional high-ventilation courtyard layouts in dense retail markets like Aminabad.";
+            regionalIcon = "🕌";
+        } else if (activeCity === "delhi") {
+            regionalTitle = "Delhi Ridge Buffer Enforcement";
+            regionalDesc = "Enforce dense scrub-forest planting around the Delhi Ridge boundary. Combine heat mitigation with dust-arresting vegetative barriers along industrial perimeters in Okhla.";
+            regionalIcon = "🏛️";
+        } else if (activeCity === "kanpur") {
+            regionalTitle = "Kanpur Industrial Heat Barriers";
+            regionalDesc = "Plant thick multi-layered tree shelterbelts around industrial tanneries in Jajmau. Coat heavy sheet-metal factory roofs with high-reflectivity solar paints.";
+            regionalIcon = "🏭";
+        } else if (activeCity === "goa") {
+            regionalTitle = "Goa Maritime Wind Setbacks";
+            regionalDesc = "Protect shoreline beach setbacks and conserve coastal sand dune vegetation to ensure unobstructed sea-breeze microclimate cooling in beach localities.";
+            regionalIcon = "🏖️";
+        } else if (activeCity === "mumbai") {
+            regionalTitle = "Mumbai Informal Settlement Mitigation";
+            regionalDesc = "Scale community-led cool roof painting campaigns in high-density informal settlements (like Dharavi) to alleviate severe indoor heat trapping under metal sheets.";
+            regionalIcon = "🏢";
+        }
+        
+        strategies.push({
+            priority: "medium",
+            icon: regionalIcon,
+            title: regionalTitle,
+            desc: regionalDesc
+        });
+        
+        // Render strategies
+        strategyList.innerHTML = "";
+        strategies.forEach(item => {
+            const el = document.createElement("div");
+            el.className = `strategy-item priority-${item.priority}`;
+            el.innerHTML = `
+                <span class="strategy-icon">${item.icon}</span>
+                <div class="strategy-content">
+                    <span class="strategy-title">${item.title}</span>
+                    <span class="strategy-desc">${item.desc}</span>
+                </div>
+            `;
+            strategyList.appendChild(el);
         });
     }
 
-    btnResetOpt.addEventListener("click", () => {
-        // Clear optimization state and restore baseline grid
+    // 8. Grid State Utilities
+    // -------------------------------------------------------------
+    function resetGridState() {
         if (cityData) {
             currentGrid = JSON.parse(JSON.stringify(cityData.zones));
             activeInterventions = {};
@@ -875,33 +855,59 @@ document.addEventListener("DOMContentLoaded", () => {
             
             renderGrid();
             
-            // Hide summary stats
-            badgeOptSummary.classList.add("hidden");
+            // Reset strategies panel
+            strategiesPlaceholder.classList.remove("hidden");
+            strategiesActive.classList.add("hidden");
             
-            // Reset table
-            optTableBody.innerHTML = `
-                <tr class="empty-table-row">
-                    <td colspan="7">Adjust capital slider and run optimizer to generate budget allocation.</td>
-                </tr>
-            `;
-            
-            // Reset detail view
             if (selectedZone) {
                 selectZone(selectedZone.zone_id);
             }
         }
-    });
+    }
 
     // -------------------------------------------------------------
     // 9. Climate Projections 2050
     // -------------------------------------------------------------
+    function updateProjectionDescription(scenario) {
+        const descriptions = {
+            lucknow: {
+                "2026": `<strong>Lucknow today (2026):</strong> Dense urban core with avg LST 38–43°C. Green cover concentrated in Gomti riverbanks.<br><br><strong>Budget:</strong><br>• Green cover maint: ₹18 Cr/yr<br>• Cool pavement trial: ₹6 Cr/yr<br>• No major mitigation active`,
+                "2050-rcp45": `<strong>Lucknow 2050 (Moderate):</strong> Avg LST rises ~2°C. Gomti riverfront developed as a cooling corridor.<br><br><strong>Budget:</strong><br>• 15% green cover addition: ₹210 Cr<br>• Cool pavements (albedo ≥0.4): ₹95 Cr<br>• Riverfront restoration: ₹140 Cr<br>• <em>Total: ~₹445 Cr</em>`,
+                "2050-rcp85": `<strong>Lucknow 2050 (Extreme):</strong> Avg LST surges ~4.5°C. Vegetation drops below 8%. Gomti cooling effect nearly lost.<br><br><strong>Budget:</strong><br>• Emergency green cover: ₹380 Cr<br>• Cool pavement retrofitting: ₹220 Cr<br>• Heat emergency infra: ₹175 Cr<br>• <em>Total: ~₹775 Cr</em>`
+            },
+            delhi: {
+                "2026": `<strong>Delhi today (2026):</strong> Average LST 40–46°C. Yamuna floodplain provides limited cooling.<br><br><strong>Budget:</strong><br>• Current green dev: ₹45 Cr/yr<br>• Yamuna restoration: ₹28 Cr/yr<br>• Heat action plan: ₹12 Cr/yr`,
+                "2050-rcp45": `<strong>Delhi 2050 (Moderate):</strong> LST rises ~2.5°C. 20% tree cover mandate. Yamuna corridor partially revived.<br><br><strong>Budget:</strong><br>• 20% tree cover: ₹520 Cr<br>• Cool roof mandate: ₹180 Cr<br>• Yamuna restoration: ₹310 Cr<br>• <em>Total: ~₹1,010 Cr</em>`,
+                "2050-rcp85": `<strong>Delhi 2050 (Extreme):</strong> LST climbs ~5°C. Heatwave frequency triples. Yamuna dries seasonally.<br><br><strong>Budget:</strong><br>• Emergency cooling shelters: ₹290 Cr<br>• Large-scale greening: ₹680 Cr<br>• River revival: ₹450 Cr<br>• <em>Total: ~₹1,420 Cr</em>`
+            },
+            kanpur: {
+                "2026": `<strong>Kanpur today (2026):</strong> Industrial heat + slum clusters push LST to 39–44°C. Ganga riverfront offers narrow cooling.<br><br><strong>Budget:</strong><br>• Industrial compliance: ₹22 Cr/yr<br>• Slum re-roofing pilot: ₹8 Cr/yr`,
+                "2050-rcp45": `<strong>Kanpur 2050 (Moderate):</strong> LST rises ~2°C. Industrial norms tightened. Ganga ghat green buffers added.<br><br><strong>Budget:</strong><br>• Cool roofs (resettlement): ₹95 Cr<br>• Ganga ghat greening: ₹160 Cr<br>• Industrial emission control: ₹130 Cr<br>• <em>Total: ~₹385 Cr</em>`,
+                "2050-rcp85": `<strong>Kanpur 2050 (Extreme):</strong> LST rises ~4.5°C. Industrial expansion unchecked. Slum heat-exposure critical.<br><br><strong>Budget:</strong><br>• Slum heat-proofing: ₹250 Cr<br>• Forced green buffers: ₹310 Cr<br>• Health infra scaling: ₹180 Cr<br>• <em>Total: ~₹740 Cr</em>`
+            },
+            goa: {
+                "2026": `<strong>Goa today (2026):</strong> Coastal breeze moderates LST to 32–36°C. Mangroves and wooded hills provide natural cooling.<br><br><strong>Budget:</strong><br>• Mangrove conservation: ₹10 Cr/yr<br>• Tourism green compliance: ₹6 Cr/yr`,
+                "2050-rcp45": `<strong>Goa 2050 (Moderate):</strong> LST rises ~1.5°C. CRZ enforced. Mangrove restoration along Mandovi & Zuari.<br><br><strong>Budget:</strong><br>• Mangrove restoration: ₹95 Cr<br>• Coastal green buffer: ₹75 Cr<br>• Tourism green mandate: ₹60 Cr<br>• <em>Total: ~₹230 Cr</em>`,
+                "2050-rcp85": `<strong>Goa 2050 (Extreme):</strong> LST rises ~3°C. Mangroves degraded by saltwater intrusion. Tourism infrastructure expands inland.<br><br><strong>Budget:</strong><br>• Mangrove revival: ₹180 Cr<br>• Inland green corridors: ₹140 Cr<br>• Coastal protection: ₹210 Cr<br>• <em>Total: ~₹530 Cr</em>`
+            },
+            mumbai: {
+                "2026": `<strong>Mumbai today (2026):</strong> Coastal LST 33–38°C with strong sea-breeze modulation. Eastern suburbs see rapid vertical growth.<br><br><strong>Budget:</strong><br>• Coastal promenade maint: ₹15 Cr/yr<br>• Mangrove patrol: ₹9 Cr/yr`,
+                "2050-rcp45": `<strong>Mumbai 2050 (Moderate):</strong> LST rises ~1.5°C. Coastal green promenades expanded. Mangrove cover stabilized.<br><br><strong>Budget:</strong><br>• Promenade expansion: ₹120 Cr<br>• Thane Creek mangrove: ₹90 Cr<br>• Cool pavement coastal road: ₹85 Cr<br>• <em>Total: ~₹295 Cr</em>`,
+                "2050-rcp85": `<strong>Mumbai 2050 (Extreme):</strong> LST rises ~3.5°C. Marine heatwaves suppress sea-breeze. Ventilation corridors blocked.<br><br><strong>Budget:</strong><br>• Ventilation corridor clearing: ₹200 Cr<br>• Vertical green retrofit: ₹310 Cr<br>• Coastal defence + green: ₹280 Cr<br>• <em>Total: ~₹790 Cr</em>`
+            }
+        };
+        const cityDesc = descriptions[activeCity] || descriptions.lucknow;
+        document.getElementById("projection-desc-notes").innerHTML = cityDesc[scenario] || cityDesc["2026"];
+    }
+
     climateRadios.forEach(radio => {
         radio.addEventListener("change", (e) => {
             const val = e.target.value;
+            updateProjectionDescription(val);
             
             if (val === "2026") {
                 // Restore baseline
-                btnResetOpt.click();
+                resetGridState();
             } else {
                 // Fetch projection for year 2050
                 const rcp = val.split("-")[1]; // rcp45 or rcp85

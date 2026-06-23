@@ -14,7 +14,7 @@ GRID_SIZE = 15
 CITY_CONFIGS = {
     "lucknow": {
         "lat": 26.8467, "lon": 80.9462,
-        "lat_range": 0.12, "lon_range": 0.14,
+        "lat_range": 0.22, "lon_range": 0.26,
         "base_temp": 41.5, "base_wind": 3.2, "base_solar": 880.0,
         "water_type": "river_gomti",
         "landmarks": {
@@ -28,7 +28,7 @@ CITY_CONFIGS = {
     },
     "delhi": {
         "lat": 28.6139, "lon": 77.2090,
-        "lat_range": 0.14, "lon_range": 0.16,
+        "lat_range": 0.26, "lon_range": 0.28,
         "base_temp": 42.8, "base_wind": 2.8, "base_solar": 910.0,
         "water_type": "river_yamuna",
         "landmarks": {
@@ -41,7 +41,7 @@ CITY_CONFIGS = {
     },
     "kanpur": {
         "lat": 26.4499, "lon": 80.3319,
-        "lat_range": 0.12, "lon_range": 0.14,
+        "lat_range": 0.20, "lon_range": 0.22,
         "base_temp": 42.0, "base_wind": 3.0, "base_solar": 890.0,
         "water_type": "river_ganges",
         "landmarks": {
@@ -53,7 +53,7 @@ CITY_CONFIGS = {
     },
     "goa": {
         "lat": 15.4909, "lon": 73.8278,
-        "lat_range": 0.10, "lon_range": 0.12,
+        "lat_range": 0.18, "lon_range": 0.20,
         "base_temp": 33.5, "base_wind": 4.5, "base_solar": 820.0,
         "water_type": "coastline_goa",
         "landmarks": {
@@ -65,7 +65,7 @@ CITY_CONFIGS = {
     },
     "mumbai": {
         "lat": 19.0760, "lon": 72.8777,
-        "lat_range": 0.20, "lon_range": 0.12,
+        "lat_range": 0.38, "lon_range": 0.18,
         "base_temp": 34.2, "base_wind": 4.2, "base_solar": 840.0,
         "water_type": "coastline_mumbai",
         "landmarks": {
@@ -492,181 +492,6 @@ def simulate_intervention(zone_data, intervention_type, intensity_pct):
         "lst_physics": float(new_lst_phys),
         "cost": float(cost)
     }
-
-def run_simulation_inference(df, model, zone_interventions):
-    df_sim = df.copy()
-    features = ["ndvi", "albedo", "isf", "pop_density", "wind_speed", "solar_radiation", "air_temperature"]
-    total_cost = 0.0
-    
-    for zone_id, interventions in zone_interventions.items():
-        idx = df_sim[df_sim["zone_id"] == zone_id].index
-        if len(idx) == 0: continue
-        idx = idx[0]
-        
-        # Don't apply changes on water cells
-        if df_sim.loc[idx, "is_water"]:
-            continue
-            
-        zone_data = df_sim.loc[idx].to_dict()
-        accumulated_changes = {
-            "city": zone_data["city"],
-            "is_water": zone_data["is_water"],
-            "ndvi": zone_data["ndvi"],
-            "albedo": zone_data["albedo"],
-            "isf": zone_data["isf"],
-            "wind_speed": zone_data["wind_speed"],
-            "air_temperature": zone_data["air_temperature"],
-            "solar_radiation": zone_data["solar_radiation"],
-            "distance_to_river": zone_data["distance_to_river"]
-        }
-        
-        zone_cost = 0.0
-        for itype, intensity in interventions.items():
-            if intensity <= 0: continue
-            sim_res = simulate_intervention(accumulated_changes, itype, intensity)
-            accumulated_changes["ndvi"] = sim_res["ndvi"]
-            accumulated_changes["albedo"] = sim_res["albedo"]
-            accumulated_changes["isf"] = sim_res["isf"]
-            accumulated_changes["wind_speed"] = sim_res["wind_speed"]
-            accumulated_changes["lst_physics"] = sim_res["lst_physics"]
-            zone_cost += sim_res["cost"]
-            
-        total_cost += zone_cost
-        
-        df_sim.loc[idx, "ndvi"] = accumulated_changes["ndvi"]
-        df_sim.loc[idx, "albedo"] = accumulated_changes["albedo"]
-        df_sim.loc[idx, "isf"] = accumulated_changes["isf"]
-        df_sim.loc[idx, "wind_speed"] = accumulated_changes["wind_speed"]
-        df_sim.loc[idx, "lst_physics"] = accumulated_changes["lst_physics"]
-        
-    # Re-run XGBoost residual predictor on land cells
-    land_mask = df_sim["is_water"] == False
-    if land_mask.any():
-        X_sim = df_sim.loc[land_mask, features]
-        df_sim.loc[land_mask, "residual_pred"] = model.predict(X_sim)
-        df_sim.loc[land_mask, "lst_day_pred"] = df_sim.loc[land_mask, "lst_physics"] + df_sim.loc[land_mask, "residual_pred"]
-    
-    # Water cells remain same
-    df_sim.loc[~land_mask, "lst_day_pred"] = df_sim.loc[~land_mask, "lst_physics"]
-    df_sim["lst_delta"] = df["lst_day_actual"] - df_sim["lst_day_pred"]
-    
-    # Recalculate nighttime LST based on modified morphology
-    for idx, row in df_sim.iterrows():
-        if row["is_water"]: continue
-        cfg = CITY_CONFIGS[row["city"]]
-        regional_air_temp_night = cfg["base_temp"] - 12.0
-        water_cool_factor = np.exp(-0.4 * row["distance_to_river"])
-        df_sim.loc[idx, "lst_night_pred"] = (
-            regional_air_temp_night + 
-            4.5 * row["isf"] - 
-            2.8 * row["ndvi"] - 
-            1.1 * row["wind_speed"] + 
-            1.8 * (row["pop_density"] / 30000.0) - 
-            1.5 * water_cool_factor
-        )
-        
-    return df_sim, total_cost
-
-def run_greedy_optimizer(df, model, budget_inr, weight_by_hvi=True):
-    df_current = df.copy()
-    allocation = {row["zone_id"]: {"tree_planting": 0, "green_roofs": 0, "cool_pavement": 0} for _, row in df.iterrows()}
-    
-    remaining_budget = float(budget_inr)
-    total_spent = 0.0
-    step_pct = 5.0
-    
-    interventions_meta = {
-        "tree_planting": {"unit_cost": 80000.0 * step_pct, "max_limit": 30.0},
-        "green_roofs": {"unit_cost": 150000.0 * step_pct, "max_limit": 40.0},
-        "cool_pavement": {"unit_cost": 100000.0 * step_pct, "max_limit": 40.0}
-    }
-    
-    iteration = 0
-    max_iterations = 800
-    
-    while remaining_budget > 400000.0 and iteration < max_iterations:
-        best_roi = -1.0
-        best_choice = None
-        
-        for _, row in df_current.iterrows():
-            if row["is_water"]: continue
-            zone_id = row["zone_id"]
-            hvi_val = row["hvi"]
-            
-            current_tree = allocation[zone_id]["tree_planting"]
-            current_green = allocation[zone_id]["green_roofs"]
-            
-            for itype, meta in interventions_meta.items():
-                cost = meta["unit_cost"]
-                if cost > remaining_budget: continue
-                if allocation[zone_id][itype] + step_pct > meta["max_limit"]: continue
-                if itype in ["tree_planting", "green_roofs"] and (current_tree + current_green + step_pct > 60.0):
-                    continue
-                
-                zone_dict = row.to_dict()
-                sim_meta = simulate_intervention(zone_dict, itype, step_pct)
-                
-                features_sim = pd.DataFrame([{
-                    "ndvi": sim_meta["ndvi"], "albedo": sim_meta["albedo"], "isf": sim_meta["isf"],
-                    "pop_density": zone_dict["pop_density"], "wind_speed": sim_meta["wind_speed"],
-                    "solar_radiation": zone_dict["solar_radiation"], "air_temperature": zone_dict["air_temperature"]
-                }])
-                
-                res_pred = model.predict(features_sim)[0]
-                temp_pred_new = sim_meta["lst_physics"] + res_pred
-                
-                delta_t = row["lst_day_actual"] - temp_pred_new
-                benefit = delta_t
-                if weight_by_hvi:
-                    benefit *= hvi_val
-                    
-                roi = benefit / cost
-                if roi > best_roi and delta_t > 0.01:
-                    best_roi = roi
-                    best_choice = (zone_id, itype)
-                    
-        if best_choice is not None:
-            zone_id, itype = best_choice
-            cost = interventions_meta[itype]["unit_cost"]
-            
-            idx = df_current[df_current["zone_id"] == zone_id].index[0]
-            zone_row = df_current.loc[idx].to_dict()
-            
-            sim_meta = simulate_intervention(zone_row, itype, step_pct)
-            df_current.loc[idx, "ndvi"] = sim_meta["ndvi"]
-            df_current.loc[idx, "albedo"] = sim_meta["albedo"]
-            df_current.loc[idx, "isf"] = sim_meta["isf"]
-            df_current.loc[idx, "wind_speed"] = sim_meta["wind_speed"]
-            df_current.loc[idx, "lst_physics"] = sim_meta["lst_physics"]
-            
-            feat_df = df_current.loc[[idx], ["ndvi", "albedo", "isf", "pop_density", "wind_speed", "solar_radiation", "air_temperature"]]
-            res_pred = model.predict(feat_df)[0]
-            df_current.loc[idx, "lst_day_actual"] = sim_meta["lst_physics"] + res_pred
-            
-            allocation[zone_id][itype] += step_pct
-            remaining_budget -= cost
-            total_spent += cost
-            iteration += 1
-        else:
-            break
-            
-    rec_list = []
-    for zone_id, alloc in allocation.items():
-        if alloc["tree_planting"] > 0 or alloc["green_roofs"] > 0 or alloc["cool_pavement"] > 0:
-            zone_name = df[df["zone_id"] == zone_id]["name"].values[0]
-            orig_temp = df[df["zone_id"] == zone_id]["lst_day_actual"].values[0]
-            new_temp = df_current[df_current["zone_id"] == zone_id]["lst_day_actual"].values[0]
-            hvi_val = df[df["zone_id"] == zone_id]["hvi"].values[0]
-            cost = alloc["tree_planting"] * 80000.0 + alloc["green_roofs"] * 150000.0 + alloc["cool_pavement"] * 100000.0
-            
-            rec_list.append({
-                "zone_id": zone_id, "name": zone_name, "hvi": float(hvi_val),
-                "tree_planting": float(alloc["tree_planting"]), "green_roofs": float(alloc["green_roofs"]), "cool_pavement": float(alloc["cool_pavement"]),
-                "original_temp": float(orig_temp), "optimized_temp": float(new_temp),
-                "cooling_impact": float(orig_temp - new_temp), "cost": float(cost)
-            })
-            
-    return allocation, sorted(rec_list, key=lambda x: x["cooling_impact"], reverse=True), total_spent
 
 def get_2050_projection(df, model, rcp_scenario="rcp85"):
     df_proj = df.copy()
