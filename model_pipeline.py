@@ -8,7 +8,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.cluster import KMeans
 from sklearn.preprocessing import MinMaxScaler
 
-GRID_SIZE = 15
+GRID_SIZE = 120
 
 # Landmark configurations for each city to guide synthetic data generation
 CITY_CONFIGS = {
@@ -84,41 +84,60 @@ def get_distance_to_water_body(city, x, y):
     cfg = CITY_CONFIGS[city]
     wtype = cfg["water_type"]
     
+    # Scale coordinates to virtual 15x15 grid to keep river math consistent
+    scale_factor = 14.0 / (GRID_SIZE - 1)
+    x_v = x * scale_factor
+    y_v = y * scale_factor
+    
     if wtype == "river_gomti":
-        # Gomti River centerline
-        river_points = [(13.0 - 0.8 * yr - 2.0 * np.sin(yr / 2.0), yr) for yr in np.linspace(0, GRID_SIZE-1, 50)]
-        return min(np.sqrt((x - xr)**2 + (y - yr)**2) for xr, yr in river_points)
+        # Gomti River centerline (computed on virtual 15x15 scale)
+        river_points = [(13.0 - 0.8 * yr - 2.0 * np.sin(yr / 2.0), yr) for yr in np.linspace(0, 14.0, 50)]
+        d_v = min(np.sqrt((x_v - xr)**2 + (y_v - yr)**2) for xr, yr in river_points)
+        return d_v / scale_factor
         
     elif wtype == "river_yamuna":
-        # Yamuna River (NW to SE in Delhi)
-        river_points = [(9.0 - 0.3 * yr - 1.5 * np.cos(yr / 3.0), yr) for yr in np.linspace(0, GRID_SIZE-1, 50)]
-        return min(np.sqrt((x - xr)**2 + (y - yr)**2) for xr, yr in river_points)
+        # Yamuna River (NW to SE in Delhi) (computed on virtual 15x15 scale)
+        river_points = [(9.0 - 0.3 * yr - 1.5 * np.cos(yr / 3.0), yr) for yr in np.linspace(0, 14.0, 50)]
+        d_v = min(np.sqrt((x_v - xr)**2 + (y_v - yr)**2) for xr, yr in river_points)
+        return d_v / scale_factor
         
     elif wtype == "river_ganges":
-        # Ganges River along Kanpur north boundary (y approx 13-14)
-        river_points = [(xr, 13.0 + 0.5 * np.sin(xr / 2.0)) for xr in np.linspace(0, GRID_SIZE-1, 50)]
-        return min(np.sqrt((x - xr)**2 + (y - yr)**2) for xr, yr in river_points)
+        # Ganges River along Kanpur north boundary (y approx 13-14) (computed on virtual 15x15 scale)
+        river_points = [(xr, 13.0 + 0.5 * np.sin(xr / 2.0)) for xr in np.linspace(0, 14.0, 50)]
+        d_v = min(np.sqrt((x_v - xr)**2 + (y_v - yr)**2) for xr, yr in river_points)
+        return d_v / scale_factor
         
     elif wtype == "coastline_goa":
-        # Goa Coast: West side is sea (x <= 3)
-        if x <= 3.0:
+        # Goa Coast: West side is sea (x_v <= 3)
+        if x_v <= 3.0:
             return 0.0
-        return float(x - 3.0)
+        return float(x_v - 3.0) / scale_factor
         
     elif wtype == "coastline_mumbai":
-        # Mumbai Peninsula: West (x <= 3) and East (x >= 12) is sea/creek
-        if x <= 3.0:
+        # Mumbai Peninsula: West (x_v <= 3) and East (x_v >= 12) is sea/creek
+        if x_v <= 3.0:
             return 0.0
-        elif x >= 12.0:
+        elif x_v >= 12.0:
             return 0.0
-        return float(min(x - 3.0, 12.0 - x))
+        d_v = float(min(x_v - 3.0, 12.0 - x_v))
+        return d_v / scale_factor
         
     return 999.0
 
 def calculate_physics_lst(air_temp, solar_rad, albedo, wind_speed, ndvi):
-    h_c = 5.8 + 4.1 * wind_speed
-    rad_forcing = ((1.0 - albedo) * solar_rad) / h_c
-    evap_cooling = 9.0 * ndvi * (solar_rad / 900.0)
+    # h_c represents heat transfer via convection and radiation (infrared loss)
+    # Natural buoyancy convection and radiative loss give a baseline of ~25.0 W/m²K
+    # Forced convection adds ~4.5 * wind_speed
+    h_c = 25.0 + 4.5 * wind_speed
+    
+    # Ground conduction fraction: ~15% of solar energy is conducted into the soil (not heating the surface skin directly)
+    solar_absorbed = (1.0 - albedo) * solar_rad * 0.85
+    
+    rad_forcing = solar_absorbed / h_c
+    
+    # Latent heat cooling (evapotranspiration) is stronger under high vegetation
+    evap_cooling = 12.0 * ndvi * (solar_rad / 900.0)
+    
     return air_temp + rad_forcing - evap_cooling
 
 def generate_city_dataset(city_name):
@@ -158,9 +177,11 @@ def generate_city_dataset(city_name):
             closest_landmark_name = "Zone"
             min_dist = 999.0
             
+            scale_actual = (GRID_SIZE - 1) / 14.0
             for name, landmark in landmarks.items():
-                lx, ly = landmark["coord"]
-                dist = np.sqrt((x - lx)**2 + (y - ly)**2)
+                lx_scaled = landmark["coord"][0] * scale_actual
+                ly_scaled = landmark["coord"][1] * scale_actual
+                dist = np.sqrt((x - lx_scaled)**2 + (y - ly_scaled)**2)
                 if dist < min_dist:
                     min_dist = dist
                     closest_landmark_name = name
@@ -493,6 +514,51 @@ def simulate_intervention(zone_data, intervention_type, intensity_pct):
         "cost": float(cost)
     }
 
+def run_simulation_inference(df, model, active_interventions):
+    """
+    Runs simulation inference on a city dataframe using the trained model and a dictionary of active interventions per zone.
+    """
+    df_sim = df.copy()
+    total_cost = 0.0
+    
+    for idx, row in df_sim.iterrows():
+        zone_id = row["zone_id"]
+        interventions = active_interventions.get(zone_id, {})
+        
+        # Apply each active intervention sequentially on the zone data
+        zone_dict = row.to_dict()
+        zone_cost = 0.0
+        
+        for int_type, intensity in interventions.items():
+            if intensity > 0:
+                res = simulate_intervention(zone_dict, int_type, intensity)
+                # Update zone_dict with modified values for the next intervention
+                zone_dict["ndvi"] = res["ndvi"]
+                zone_dict["albedo"] = res["albedo"]
+                zone_dict["isf"] = res["isf"]
+                zone_dict["wind_speed"] = res["wind_speed"]
+                zone_dict["lst_physics"] = res["lst_physics"]
+                zone_cost += res["cost"]
+        
+        # Save updated physical parameters to dataframe
+        df_sim.loc[idx, "ndvi"] = zone_dict["ndvi"]
+        df_sim.loc[idx, "albedo"] = zone_dict["albedo"]
+        df_sim.loc[idx, "isf"] = zone_dict["isf"]
+        df_sim.loc[idx, "wind_speed"] = zone_dict["wind_speed"]
+        df_sim.loc[idx, "lst_physics"] = zone_dict["lst_physics"]
+        total_cost += zone_cost
+        
+    # Re-predict daytime LST using XGBoost model for all non-water zones
+    land_mask = df_sim["is_water"] == False
+    features = ["ndvi", "albedo", "isf", "pop_density", "wind_speed", "solar_radiation", "air_temperature"]
+    if land_mask.any():
+        df_sim.loc[land_mask, "residual_pred"] = model.predict(df_sim.loc[land_mask, features])
+        df_sim.loc[land_mask, "lst_day_pred"] = df_sim.loc[land_mask, "lst_physics"] + df_sim.loc[land_mask, "residual_pred"]
+    
+    df_sim.loc[~land_mask, "lst_day_pred"] = df_sim.loc[~land_mask, "lst_physics"]
+    
+    return df_sim, total_cost
+
 def get_2050_projection(df, model, rcp_scenario="rcp85"):
     df_proj = df.copy()
     
@@ -509,24 +575,34 @@ def get_2050_projection(df, model, rcp_scenario="rcp85"):
     df_proj["wind_speed"] = df_proj["wind_speed"] * wind_speed_scale
     df_proj["solar_radiation"] = df_proj["solar_radiation"] * solar_rad_scale
     
-    for idx, row in df_proj.iterrows():
-        if row["is_water"]: continue
-        if row["ndvi"] > 0.25 and row["isf"] < 0.50:
-            df_proj.loc[idx, "ndvi"] = np.clip(row["ndvi"] - 0.15, 0.05, 0.8)
-            df_proj.loc[idx, "isf"] = np.clip(row["isf"] + 0.15, 0.1, 0.95)
-            df_proj.loc[idx, "albedo"] = np.clip(row["albedo"] - 0.02, 0.05, 0.6)
-        else:
-            df_proj.loc[idx, "ndvi"] = np.clip(row["ndvi"] - 0.03, 0.05, 0.8)
-            df_proj.loc[idx, "isf"] = np.clip(row["isf"] + 0.03, 0.1, 0.95)
-        df_proj.loc[idx, "pop_density"] = np.clip(row["pop_density"] * 1.25, 500, 55000)
+    # Identify non-water zones
+    land_mask = df_proj["is_water"] == False
+    
+    if land_mask.any():
+        # Mask for specific conditional NDVI/ISF logic
+        cond_mask = land_mask & (df_proj["ndvi"] > 0.25) & (df_proj["isf"] < 0.50)
+        else_mask = land_mask & ~cond_mask
         
-    # Recalculate physics & predict LST for land cells
-    for idx, row in df_proj.iterrows():
-        new_lst_phys = calculate_physics_lst(row["air_temperature"], row["solar_radiation"], row["albedo"], row["wind_speed"], row["ndvi"])
-        df_proj.loc[idx, "lst_physics"] = new_lst_phys
+        # Apply conditional rules using vectorized assignments
+        df_proj.loc[cond_mask, "ndvi"] = np.clip(df_proj.loc[cond_mask, "ndvi"] - 0.15, 0.05, 0.8)
+        df_proj.loc[cond_mask, "isf"] = np.clip(df_proj.loc[cond_mask, "isf"] + 0.15, 0.1, 0.95)
+        df_proj.loc[cond_mask, "albedo"] = np.clip(df_proj.loc[cond_mask, "albedo"] - 0.02, 0.05, 0.6)
+        
+        df_proj.loc[else_mask, "ndvi"] = np.clip(df_proj.loc[else_mask, "ndvi"] - 0.03, 0.05, 0.8)
+        df_proj.loc[else_mask, "isf"] = np.clip(df_proj.loc[else_mask, "isf"] + 0.03, 0.1, 0.95)
+        
+        df_proj.loc[land_mask, "pop_density"] = np.clip(df_proj.loc[land_mask, "pop_density"] * 1.25, 500, 55000)
+        
+    # Recalculate physics LST for all cells in one vectorized call
+    df_proj["lst_physics"] = calculate_physics_lst(
+        df_proj["air_temperature"],
+        df_proj["solar_radiation"],
+        df_proj["albedo"],
+        df_proj["wind_speed"],
+        df_proj["ndvi"]
+    )
         
     features = ["ndvi", "albedo", "isf", "pop_density", "wind_speed", "solar_radiation", "air_temperature"]
-    land_mask = df_proj["is_water"] == False
     if land_mask.any():
         X_proj = df_proj.loc[land_mask, features]
         df_proj.loc[land_mask, "residual_pred"] = model.predict(X_proj)
@@ -534,18 +610,20 @@ def get_2050_projection(df, model, rcp_scenario="rcp85"):
     
     df_proj.loc[~land_mask, "lst_day_pred"] = df_proj.loc[~land_mask, "lst_physics"]
     
-    # Project Nighttime LST
-    for idx, row in df_proj.iterrows():
-        if row["is_water"]: continue
-        cfg = CITY_CONFIGS[row["city"]]
+    # Project Nighttime LST using vectorized logic
+    df_proj["lst_night_pred"] = df_proj["lst_night_actual"]
+    if land_mask.any():
+        city_name = df_proj.loc[land_mask, "city"].iloc[0]
+        cfg = CITY_CONFIGS[city_name]
         regional_air_temp_night = (cfg["base_temp"] - 12.0) + (air_temp_increase * 0.9)
-        water_cool_factor = np.exp(-0.4 * row["distance_to_river"])
-        df_proj.loc[idx, "lst_night_pred"] = (
+        water_cool_factor = np.exp(-0.4 * df_proj.loc[land_mask, "distance_to_river"])
+        
+        df_proj.loc[land_mask, "lst_night_pred"] = (
             regional_air_temp_night + 
-            4.5 * row["isf"] - 
-            2.8 * row["ndvi"] - 
-            1.1 * row["wind_speed"] + 
-            1.8 * (row["pop_density"] / 30000.0) - 
+            4.5 * df_proj.loc[land_mask, "isf"] - 
+            2.8 * df_proj.loc[land_mask, "ndvi"] - 
+            1.1 * df_proj.loc[land_mask, "wind_speed"] + 
+            1.8 * (df_proj.loc[land_mask, "pop_density"] / 30000.0) - 
             1.5 * water_cool_factor
         )
         

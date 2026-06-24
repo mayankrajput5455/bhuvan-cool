@@ -346,6 +346,15 @@ h1, h2, h3, h4, .font-heading {
     color: var(--accent-blue) !important;
 }
 
+.city-boundary-poly {
+    filter: drop-shadow(0 0 12px rgba(0, 242, 254, 0.45)) drop-shadow(4px 4px 10px rgba(0, 0, 0, 0.8));
+    transition: filter 0.3s ease;
+}
+
+.heatmap-tile {
+    filter: blur(5px);
+}
+
 /* Animated wind corridor polyline in Leaflet */
 .leaflet-interactive.corridor-line {
     fill: none;

@@ -17,6 +17,16 @@ document.addEventListener("DOMContentLoaded", () => {
     let boundaryLayer = null;    // L.layerGroup for city boundary curves
     let highlightLayer = null;   // L.layerGroup for selected/hovered indicators
     
+    // Performance optimization structures
+    let cachedGridMinLat = 0;
+    let cachedGridMaxLat = 0;
+    let cachedGridMinLon = 0;
+    let cachedGridMaxLon = 0;
+    let cachedGridSize = 120;
+    let gridLookupMap = {};      // 2D lookup map: gridLookupMap[y][x]
+    let zoneIdMap = {};          // ID lookup map: zoneIdMap[zone_id]
+    let heatmapOverlay = null;   // Single Leaflet ImageOverlay for the entire grid
+    
     const citySelectEl = document.getElementById("city-select");
     
     // UI Selectors
@@ -56,6 +66,31 @@ document.addEventListener("DOMContentLoaded", () => {
     // -------------------------------------------------------------
     // 1. Data Fetching
     // -------------------------------------------------------------
+    function updateGridMaps() {
+        if (!currentGrid || currentGrid.length === 0) return;
+        
+        cachedGridSize = cityData && cityData.grid_size ? cityData.grid_size : 120;
+        
+        const lats = currentGrid.map(z => z.latitude);
+        const lons = currentGrid.map(z => z.longitude);
+        cachedGridMinLat = Math.min(...lats);
+        cachedGridMaxLat = Math.max(...lats);
+        cachedGridMinLon = Math.min(...lons);
+        cachedGridMaxLon = Math.max(...lons);
+        
+        gridLookupMap = {};
+        zoneIdMap = {};
+        
+        currentGrid.forEach(zone => {
+            if (gridLookupMap[zone.y] === undefined) {
+                gridLookupMap[zone.y] = {};
+            }
+            gridLookupMap[zone.y][zone.x] = zone;
+            
+            zoneIdMap[zone.zone_id] = zone;
+        });
+    }
+
     const cityCenters = {
         lucknow: [26.8467, 80.9462],
         delhi: [28.6139, 77.2090],
@@ -90,12 +125,16 @@ document.addEventListener("DOMContentLoaded", () => {
                         };
                     });
                     
+                    updateGridMaps();
+                    heatmapOverlay = null; // Recreate heatmap overlay for the new city
+                    
                     // Leaflet map setup
                     if (!map) {
                         map = L.map('map', {
                             zoomControl: true,
                             minZoom: 10,
-                            maxZoom: 15
+                            maxZoom: 15,
+                            preferCanvas: true
                         });
                         
                         L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
@@ -144,17 +183,22 @@ document.addEventListener("DOMContentLoaded", () => {
     // -------------------------------------------------------------
     // Nearest zone Euclidean search helper
     function getNearestZone(lat, lon) {
-        if (!currentGrid) return null;
-        let minDistance = Infinity;
-        let nearestZone = null;
-        currentGrid.forEach(zone => {
-            const dist = Math.pow(zone.latitude - lat, 2) + Math.pow(zone.longitude - lon, 2);
-            if (dist < minDistance) {
-                minDistance = dist;
-                nearestZone = zone;
-            }
-        });
-        return nearestZone;
+        if (!currentGrid || !gridLookupMap) return null;
+        
+        const rowFraction = (lat - cachedGridMinLat) / (cachedGridMaxLat - cachedGridMinLat);
+        const colFraction = (lon - cachedGridMinLon) / (cachedGridMaxLon - cachedGridMinLon);
+        
+        const row = Math.round(rowFraction * (cachedGridSize - 1));
+        const col = Math.round(colFraction * (cachedGridSize - 1));
+        
+        const clampedRow = Math.max(0, Math.min(cachedGridSize - 1, row));
+        const clampedCol = Math.max(0, Math.min(cachedGridSize - 1, col));
+        
+        if (gridLookupMap[clampedRow] && gridLookupMap[clampedRow][clampedCol]) {
+            return gridLookupMap[clampedRow][clampedCol];
+        }
+        
+        return null;
     }
 
     let hoverCircle = null;
@@ -216,32 +260,32 @@ document.addEventListener("DOMContentLoaded", () => {
 
     function renderGrid() {
         if (!map || !currentGrid) return;
-        gridLayer.clearLayers();
+        
         boundaryLayer.clearLayers();
         highlightLayer.clearLayers();
         
-        // Calculate grid coordinate ranges
-        const lats = currentGrid.map(z => z.latitude);
-        const lons = currentGrid.map(z => z.longitude);
-        const minLat = Math.min(...lats);
-        const maxLat = Math.max(...lats);
-        const minLon = Math.min(...lons);
-        const maxLon = Math.max(...lons);
+        const gridSize = cityData && cityData.grid_size ? cityData.grid_size : 120;
         
-        // Center and scale for squircle boundary
+        // 1. Re-draw the boundary polygon
+        const dxs = currentGrid.map(z => z.latitude);
+        const dys = currentGrid.map(z => z.longitude);
+        const minLat = Math.min(...dxs);
+        const maxLat = Math.max(...dxs);
+        const minLon = Math.min(...dys);
+        const maxLon = Math.max(...dys);
+        
         const centerLat = (minLat + maxLat) / 2;
         const centerLon = (minLon + maxLon) / 2;
         const halfLat = (maxLat - minLat) / 2;
         const halfLon = (maxLon - minLon) / 2;
         
-        // 1.08 padding covers all 15x15 cell centroids perfectly
         const padding = 1.08;
         const a = halfLon * padding;
         const b = halfLat * padding;
         
         const boundaryPoints = [];
         const steps = 72;
-        const n = 3.5; // Squircle curvature degree
+        const n = 3.5;
         
         for (let i = 0; i < steps; i++) {
             const t = (i / steps) * 2 * Math.PI;
@@ -254,21 +298,19 @@ document.addEventListener("DOMContentLoaded", () => {
             boundaryPoints.push([centerLat + y, centerLon + x]);
         }
         
-        // Draw the main city boundary polygon (curved outline)
         const boundaryPoly = L.polygon(boundaryPoints, {
             color: "var(--accent-teal)",
             weight: 2,
             opacity: 0.85,
-            fillColor: "rgba(0, 242, 254, 0.02)",
-            fillOpacity: 0.15,
+            fillColor: "rgba(0, 242, 254, 0.01)",
+            fillOpacity: 0.1,
             fill: true,
-            lineJoin: "round"
+            lineJoin: "round",
+            className: "city-boundary-poly"
         }).addTo(boundaryLayer);
         
-        // Setup tooltip dynamic binding
         boundaryPoly.bindTooltip("", { sticky: true, className: "leaflet-tooltip-custom" });
         
-        // Interactive probing inside the boundary
         boundaryPoly.on("mousemove", (e) => {
             const nearest = getNearestZone(e.latlng.lat, e.latlng.lng);
             if (nearest) {
@@ -283,7 +325,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     metricValStr = `${val.toFixed(1)}°C`;
                 } else if (currentView === "hvi") {
                     metricName = "HVI";
-                    metricValStr = `${val.toFixed(2)} (${nearest.hvi_class})`;
+                    metricValStr = nearest.is_water ? "N/A" : `${val.toFixed(2)} (${nearest.hvi_class})`;
                 } else if (currentView === "cluster") {
                     metricName = "Priority";
                     metricValStr = nearest.cluster_label;
@@ -297,8 +339,6 @@ document.addEventListener("DOMContentLoaded", () => {
                     tooltipText = `<strong>${nearest.name}</strong><br>Water Zone<br>LST: ${getLSTValue(nearest).toFixed(1)}°C`;
                 }
                 boundaryPoly.setTooltipContent(tooltipText);
-                
-                // Show dynamic colored hover target circle
                 drawHoverIndicator(nearest);
             }
         });
@@ -314,32 +354,69 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
         
-        // Optional water bodies circles overlay if checked
+        // 2. Render Heatmap Image Overlay
+        const latStep = (maxLat - minLat) / (gridSize - 1);
+        const lonStep = (maxLon - minLon) / (gridSize - 1);
+        const bounds = [
+            [minLat - latStep / 2, minLon - lonStep / 2],
+            [maxLat + latStep / 2, maxLon + lonStep / 2]
+        ];
+        
+        const canvas = document.createElement("canvas");
+        canvas.width = gridSize;
+        canvas.height = gridSize;
+        const ctx = canvas.getContext("2d");
+        ctx.clearRect(0, 0, gridSize, gridSize);
+        
         const showWaterGeometry = toggleRiverCheckbox.checked;
-        if (showWaterGeometry) {
-            currentGrid.forEach(zone => {
+        
+        currentGrid.forEach(zone => {
+            const x = zone.x;
+            const y = (gridSize - 1) - zone.y; // Invert y-axis for canvas
+            
+            if (x < 0 || x >= gridSize || y < 0 || y >= gridSize) return;
+            
+            const dx = (zone.longitude - centerLon) / a;
+            const dy = (zone.latitude - centerLat) / b;
+            const dist = Math.pow(Math.abs(dx), n) + Math.pow(Math.abs(dy), n);
+            
+            if (dist <= 1.05) {
                 if (zone.is_water) {
-                    L.circle([zone.latitude, zone.longitude], {
-                        radius: 350,
-                        color: "#004b6b",
-                        weight: 1,
-                        fillColor: "#006c9e",
-                        fillOpacity: 0.35
-                    }).bindTooltip(`${zone.name}<br>LST: ${getLSTValue(zone).toFixed(1)}°C<br>Water Zone`, { sticky: true, className: "leaflet-tooltip-custom" })
-                    .on("click", () => {
-                        selectZone(zone.zone_id);
-                    })
-                    .addTo(gridLayer);
+                    if (showWaterGeometry) {
+                        ctx.fillStyle = "#004b6b";
+                        ctx.globalAlpha = 0.35;
+                        ctx.fillRect(x, y, 1, 1);
+                    }
+                } else {
+                    const val = getMetricValue(zone, currentView);
+                    ctx.fillStyle = getColorForValue(val, currentView, zone);
+                    ctx.globalAlpha = 0.65;
+                    ctx.fillRect(x, y, 1, 1);
                 }
+            }
+        });
+        
+        const dataUrl = canvas.toDataURL();
+        
+        if (heatmapOverlay) {
+            heatmapOverlay.setUrl(dataUrl);
+            heatmapOverlay.setBounds(bounds);
+        } else {
+            gridLayer.clearLayers(); // Clear old city overlays
+            heatmapOverlay = L.imageOverlay(dataUrl, bounds, {
+                opacity: 1.0,
+                interactive: false,
+                className: "heatmap-image-overlay"
             });
+            gridLayer.addLayer(heatmapOverlay);
         }
         
-        // Redraw selected zone highlight if one exists
+        // 3. Highlight selected zone
         if (selectedZone) {
             drawSelectedHighlight(selectedZone);
         }
         
-        // Update wind corridors
+        // 4. Update wind corridors
         drawWindCorridors();
     }
 
@@ -375,21 +452,21 @@ document.addEventListener("DOMContentLoaded", () => {
     // Helper to calculate cell color
     function getColorForValue(val, view, zone) {
         if (view === "lst_day") {
-            // Scale between 35°C (Cool/Green) and 45°C (Extreme Heat/Red)
-            const minT = 34.0;
-            const maxT = 45.0;
+            // Scale between 30°C (Vibrant Blue/Cool) and 70°C (Extreme Heat/Red)
+            const minT = 30.0;
+            const maxT = 70.0;
             const norm = Math.max(0, Math.min(1, (val - minT) / (maxT - minT)));
-            // HSL path: Green (120) -> Yellow (60) -> Red (0)
-            const hue = (1.0 - norm) * 120;
-            return `hsl(${hue}, 80%, 45%)`;
+            // Spectral scale: 240 (Blue) -> 120 (Green) -> 60 (Yellow) -> 0 (Red)
+            const hue = (1.0 - norm) * 240;
+            return `hsl(${hue}, 95%, 48%)`;
         } 
         else if (view === "lst_night") {
-            // Scale between 26°C and 34°C
-            const minT = 26.0;
-            const maxT = 34.0;
+            // Scale between 20°C and 36°C
+            const minT = 20.0;
+            const maxT = 36.0;
             const norm = Math.max(0, Math.min(1, (val - minT) / (maxT - minT)));
-            const hue = (1.0 - norm) * 120;
-            return `hsl(${hue}, 80%, 45%)`;
+            const hue = (1.0 - norm) * 240;
+            return `hsl(${hue}, 95%, 48%)`;
         } 
         else if (view === "hvi") {
             // Scale between 0.15 (Green/Safe) and 0.85 (Extreme/Red)
@@ -429,7 +506,7 @@ document.addEventListener("DOMContentLoaded", () => {
         
         cityData.corridors.forEach(corridor => {
             const latlngs = corridor.zones
-                .map(zoneId => currentGrid.find(z => z.zone_id === zoneId))
+                .map(zoneId => zoneIdMap[zoneId])
                 .filter(z => z !== undefined)
                 .map(z => [z.latitude, z.longitude]);
             
@@ -467,13 +544,14 @@ document.addEventListener("DOMContentLoaded", () => {
         legendEl.innerHTML = "";
         
         if (currentView === "lst_day" || currentView === "lst_night") {
-            const minT = currentView === "lst_day" ? "34°C" : "26°C";
-            const maxT = currentView === "lst_day" ? "45°C+" : "34°C+";
+            const minT = currentView === "lst_day" ? "30°C" : "20°C";
+            const maxT = currentView === "lst_day" ? "70°C" : "36°C";
             legendEl.innerHTML = `
-                <div class="legend-item"><span class="legend-color" style="background: hsl(120, 80%, 45%)"></span> <span>Cool (${minT})</span></div>
-                <div class="legend-item"><span class="legend-color" style="background: hsl(60, 80%, 45%)"></span> <span>Moderate</span></div>
-                <div class="legend-item"><span class="legend-color" style="background: hsl(30, 80%, 45%)"></span> <span>Warm</span></div>
-                <div class="legend-item"><span class="legend-color" style="background: hsl(0, 80%, 45%)"></span> <span>Extreme Heat (${maxT})</span></div>
+                <div class="legend-item"><span class="legend-color" style="background: hsl(240, 95%, 48%)"></span> <span>Cool (${minT})</span></div>
+                <div class="legend-item"><span class="legend-color" style="background: hsl(180, 95%, 48%)"></span> <span>Mild</span></div>
+                <div class="legend-item"><span class="legend-color" style="background: hsl(120, 95%, 48%)"></span> <span>Moderate</span></div>
+                <div class="legend-item"><span class="legend-color" style="background: hsl(60, 95%, 48%)"></span> <span>Warm</span></div>
+                <div class="legend-item"><span class="legend-color" style="background: hsl(0, 95%, 48%)"></span> <span>Extreme Heat (${maxT})</span></div>
             `;
         } 
         else if (currentView === "hvi") {
@@ -505,7 +583,7 @@ document.addEventListener("DOMContentLoaded", () => {
     // 5. Zone Selection & SHAP Charts
     // -------------------------------------------------------------
     function selectZone(zoneId) {
-        const found = currentGrid.find(z => z.zone_id === zoneId);
+        const found = zoneIdMap[zoneId];
         if (!found) return;
         selectedZone = found;
         
@@ -853,6 +931,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 activeInterventions[z.zone_id] = { tree_planting: 0, green_roofs: 0, cool_pavement: 0 };
             });
             
+            updateGridMaps();
             renderGrid();
             
             // Reset strategies panel
@@ -947,6 +1026,7 @@ document.addEventListener("DOMContentLoaded", () => {
                             };
                         });
                         
+                        updateGridMaps();
                         renderGrid();
                         
                         if (selectedZone) {
